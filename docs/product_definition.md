@@ -358,10 +358,9 @@ data. Beyond that, behavior depends on the failure type:
    `langgraph-checkpoint-postgres`, so a pending approval survives a machine
    restart instead of being silently lost), plus app-specific tracking:
    notification dedup milestones, the Gmail digest checkpoint (`historyId`),
-   and Claude Code session IDs per assignment. One-time setup on Ubuntu:
-   ```
-   sudo apt update && sudo apt install -y postgresql
-   ```
+   and Claude Code session IDs per assignment. **Already installed and running**
+   on this machine (PostgreSQL 16, `main` cluster on port 5432) — no `apt
+   install` needed; only a project-specific database/role still needs creating.
 8. **Scheduler**: the Phase 4 polling job runs **in-process**, inside the
    same long-running Python program that hosts the WhatsApp webhook server
    (e.g. via APScheduler) — one process to run and monitor, rather than a

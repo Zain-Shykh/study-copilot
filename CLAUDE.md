@@ -14,6 +14,41 @@ file only summarizes the architecture that spans multiple files.
 This repo currently contains only the scaffold: every file under `agent/` has a
 one-line docstring naming its purpose but no implementation yet.
 
+## Development workflow — spec-driven, phase by phase
+
+**No implementation code is written for a phase until that phase's spec exists
+in `specs/` and has been explicitly approved by the user.** This is the
+governing rule for all work in this repo — read it before touching any file
+under `agent/`.
+
+Phases are built in the order laid out in `docs/implementation_plan.md`
+(0 → 1 → 2 → 3 → 4). For each phase:
+
+1. **Write the spec** at `specs/<phase-slug>.md` (e.g.
+   `specs/phase-0-environment-setup.md`, `specs/phase-2-drafting.md`),
+   synthesizing:
+   - `docs/product_definition.md` — the behavior/permission rules this phase
+     must satisfy
+   - `docs/implementation_plan.md` — that phase's objective, core
+     requirements, out-of-scope boundary, and acceptance criteria
+   - `docs/database_schema.md` — any tables this phase reads or writes
+
+   The spec must be a **complete implementation description**, not a
+   restatement of the plan: exact files/modules to create or change, function
+   signatures, data flow through them, the concrete Postgres queries/tables
+   touched, every error case and how it's handled, and how the design
+   satisfies each acceptance criterion already listed for that phase in the
+   implementation plan. Write it so someone with no other context — including
+   a future Claude session — could implement it correctly with no further
+   design decisions left open.
+2. **Get it approved.** Present the spec for review and stop. A question,
+   discussion, or requested revision is not approval — wait for the user to
+   explicitly approve before writing or editing any implementation code.
+3. **Implement exactly what the approved spec describes.** If something
+   forces a deviation mid-implementation, stop, update the spec, get it
+   re-approved, then continue — don't silently drift from what was approved.
+4. Move to the next phase and repeat from step 1.
+
 ## Environment setup
 
 Dependencies are isolated in a venv (`.venv/`), never installed to system Python.

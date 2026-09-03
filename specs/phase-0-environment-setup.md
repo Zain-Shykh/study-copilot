@@ -22,15 +22,36 @@ is a complete record of what "Phase 0 done" means, even though Claude cannot
 execute account-creation/browser-consent steps itself.
 
 ### 1.1 Google Cloud
-1. Create a Google Cloud project (any name, e.g. `personal-agent`).
+Two distinct roles here: whoever *owns* the Cloud project/OAuth client, and
+whoever the app is actually *authorized to act as* (the account whose Gmail
+and Classroom get read). Confirmed with the user: both roles are the same
+account — the **university Google account** — since that's where the actual
+Gmail/Classroom data lives and there's no separate personal account involved.
+
+1. Log into the **university Google account** at console.cloud.google.com,
+   create a Google Cloud project there (any name, e.g. `personal-agent`).
 2. APIs & Services → Enable APIs: **Gmail API**, **Google Classroom API**,
    **Google Drive API**.
 3. APIs & Services → OAuth consent screen: External, **Testing** publish
-   status, add `helloaidummy@gmail.com` as a test user. Scopes don't need to
+   status, add the **university email** as a test user. Scopes don't need to
    be pre-declared here for Testing mode with a Desktop-app client.
 4. Credentials → Create Credentials → OAuth client ID → Application type
    **Desktop app**. Copy the generated Client ID / Client Secret into
    `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` in `.env`.
+
+**Known risk, not yet confirmed either way**: some university Google
+Workspace domains have an admin-level policy blocking third-party/unverified
+OAuth apps from connecting at all, independent of which scopes are
+requested (the same restriction `docs/product_definition.md` already flags
+as a risk for the Classroom write API in v2 — it can also apply here, to any
+external app, at the domain admin's discretion). This won't be known until
+`verify_google_oauth.py` (§3.1) is actually run against the university
+account. If the consent screen shows an error naming a blocked/disallowed
+app rather than the normal permission-grant screen (e.g.
+`admin_policy_enforced` or "this app is blocked"), that confirms the
+domain restricts third-party OAuth apps — stop and go back to the user
+rather than trying workarounds, since there's no client-side fix for an
+admin-enforced policy.
 
 ### 1.2 Meta / WhatsApp
 1. Create a Meta developer account at developers.facebook.com, create an app

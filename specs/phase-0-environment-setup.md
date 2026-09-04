@@ -103,13 +103,13 @@ shows `main` cluster online on port 5432). Only a project-specific role/DB
 need creating — the app must never connect as the `postgres` superuser role.
 
 ```bash
-sudo -u postgres psql -c "CREATE ROLE personal_agent_app LOGIN PASSWORD '<choose-a-password>';"
-sudo -u postgres psql -c "CREATE DATABASE personal_agent OWNER personal_agent_app;"
-psql "postgresql://personal_agent_app:<password>@localhost:5432/personal_agent" -f agent/db/schema.sql
+sudo -u postgres psql -c "CREATE ROLE local_agent_app LOGIN PASSWORD '<choose-a-password>';"
+sudo -u postgres psql -c "CREATE DATABASE local_agent OWNER local_agent_app;"
+psql "postgresql://local_agent_app:<password>@localhost:5432/local_agent" -f agent/db/schema.sql
 ```
 
 Set `DATABASE_URL` in `.env` to
-`postgresql://personal_agent_app:<password>@localhost:5432/personal_agent`.
+`postgresql://local_agent_app:<password>@localhost:5432/local_agent`.
 
 This creates only the four app tables (`pending_items`, `email_checkpoint`,
 `notified_milestones`, `claude_sessions`) via the existing
@@ -147,8 +147,8 @@ current superuser-implying default:
  NGROK_AUTHTOKEN=
  NGROK_STATIC_DOMAIN=
 
--DATABASE_URL=postgresql://localhost/personal_agent
-+DATABASE_URL=postgresql://personal_agent_app:CHANGE_ME@localhost:5432/personal_agent
+-DATABASE_URL=postgresql://localhost/local_agent
++DATABASE_URL=postgresql://local_agent_app:CHANGE_ME@localhost:5432/local_agent
 ```
 
 `.env` (the real, gitignored file) must have every one of these populated

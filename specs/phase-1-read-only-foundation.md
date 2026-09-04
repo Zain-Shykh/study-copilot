@@ -8,7 +8,7 @@ Tech stack, Architecture), `docs/database_schema.md`, `specs/phase-0-environment
 confirmed with the user before writing this spec)
 
 1. **Intent classification and email summarization both use a lightweight
-   Anthropic API call**, not keyword/regex matching and not the Claude Code
+   Gemini API call**, not keyword/regex matching and not the Claude Code
    CLI. Rationale discussed and confirmed with the user:
    - "Summarize my unread emails" needs to read as an actual condensed
      summary (per `docs/product_definition.md`'s "Summarize one email or a
@@ -25,18 +25,25 @@ confirmed with the user before writing this spec)
      serialize *drafting* runs — routing every chat message through that
      same lock would queue ordinary reads behind an in-progress draft,
      which contradicts reads being always-available/no-approval per the
-     Permission Matrix.
-   - **This introduces a new dependency not in `docs/product_definition.md`'s
-     current "Tech stack" section: a separate `ANTHROPIC_API_KEY` and the
-     `anthropic` Python SDK, billed independently from the Claude Code
-     Pro/Max usage.** `docs/product_definition.md`'s "Decisions (locked) #2"
-     only commits to no auto-send path, and its tech-stack rationale for
-     avoiding a separate Anthropic API key is scoped to *drafting*
-     specifically — but the doc doesn't currently mention this new
-     dependency at all. **Recommend updating `docs/product_definition.md`'s
-     Tech stack section once this spec is approved**, so it stays the
-     accurate source of truth; not done as part of this spec since spec
-     files describe implementation, not edit the locked product doc.
+     Permission Matrix. This reasoning holds regardless of which model
+     provider handles classification/summarization, and rules out the
+     Claude Code path even more clearly now that a different provider
+     (Google, not Anthropic) is being used for it.
+   - **The user opted to use a free Gemini API key from Google AI Studio**
+     instead of the Anthropic API, since this app's other Google
+     dependencies (Gmail/Classroom/Drive OAuth) already mean a Google
+     account is in the trust boundary, and AI Studio's free tier avoids any
+     new billing relationship. **This introduces a new dependency not in
+     `docs/product_definition.md`'s current "Tech stack" section: a
+     `GEMINI_API_KEY` and the `google-genai` Python SDK** — a separate
+     provider from the Claude Code CLI used for drafting (Anthropic), so
+     the two are unrelated dependencies serving different purposes (Gemini
+     for lightweight routing/summarization now, Claude Code for actual
+     drafting from Phase 2 onward). **Recommend updating
+     `docs/product_definition.md`'s Tech stack section once this spec is
+     approved**, so it stays the accurate source of truth; not done as part
+     of this spec since spec files describe implementation, not edit the
+     locked product doc.
 2. **Google OAuth credentials for the real app are persisted in a new
    Postgres table**, not a file (unlike Phase 0's throwaway
    `scripts/.google_token.json`), per `specs/phase-0-environment-setup.md`
@@ -50,11 +57,12 @@ confirmed with the user before writing this spec)
    replacing Phase 0's 24h temporary token. No in-app token refresh logic is
    built in this phase — that's an out-of-band manual setup step, listed in
    §6 below.
-4. **Model choice for the Anthropic API calls**: `claude-haiku-4-5-20251001`
-   — fast/cheap, appropriate for short classification and summarization
-   calls (not full agentic work). Configurable via `ANTHROPIC_MODEL` in
-   `.env` (defaults to this value in code if unset), so it can be changed
-   without a code edit if the user wants a different model later.
+4. **Model choice for the Gemini API calls**: `gemini-3.1-flash-lite`, as
+   specified by the user (available in their AI Studio free tier at the
+   time of writing) — appropriate for short classification and
+   summarization calls, not full agentic work. Configurable via
+   `GEMINI_MODEL` in `.env` (defaults to this value in code if unset), so it
+   can be changed without a code edit if a different model is wanted later.
 
 ---
 
@@ -70,7 +78,7 @@ approval interrupts.
 agent/
   config.py                        # loads/validates .env into a Settings object
   main.py                          # FastAPI app, startup: Postgres pool + checkpointer + graph build
-  llm.py                           # NEW — Anthropic client wrapper: classify_intent(), summarize_emails()
+  llm.py                           # NEW — Gemini client wrapper: classify_intent(), summarize_emails()
   google_auth.py                   # NEW — credential load/refresh/persist, Google API client builders
   setup_google_auth.py             # NEW — one-time interactive OAuth bootstrap (run manually before first start)
   webhook/routes.py                # GET verify handshake, POST inbound message handler
@@ -159,8 +167,8 @@ class Settings:
     meta_webhook_verify_token: str
     meta_app_secret: str
     my_whatsapp_number: str
-    anthropic_api_key: str
-    anthropic_model: str  # defaults to "claude-haiku-4-5-20251001" if env var unset
+    gemini_api_key: str
+    gemini_model: str  # defaults to "gemini-3.1-flash-lite" if env var unset
 
 def load_settings() -> Settings:
     """Calls dotenv.load_dotenv(); reads each field from os.environ.
@@ -174,8 +182,8 @@ def load_settings() -> Settings:
  GOOGLE_OAUTH_CLIENT_ID=
  GOOGLE_OAUTH_CLIENT_SECRET=
 +
-+ANTHROPIC_API_KEY=
-+ANTHROPIC_MODEL=claude-haiku-4-5-20251001
++GEMINI_API_KEY=
++GEMINI_MODEL=gemini-3.1-flash-lite
 ```
 (`MY_WHATSAPP_NUMBER`, `META_APP_SECRET`, `META_WEBHOOK_VERIFY_TOKEN` already
 exist from Phase 0.)
@@ -330,7 +338,7 @@ async def receive_webhook(request: Request) -> Response:
 
 No background task queue — `graph.ainvoke` is awaited inline before
 responding to Meta. At this phase's scale (single user, no long-running
-nodes — no Claude Code, no Drive downloads), the two Anthropic calls plus one
+nodes — no Claude Code, no Drive downloads), the two Gemini calls plus one
 Google API call per message complete well within Meta's webhook response
 tolerance, so there's no need for a fire-and-forget/background-task pattern
 here. (Revisit if Phase 2's Claude Code drafting step, which is genuinely
@@ -357,55 +365,64 @@ class RouterState(TypedDict):
 ### 7.2 Node: `classify_intent` (`agent/llm.py`)
 
 ```python
-def classify_intent(client: anthropic.Anthropic, model: str, text: str) -> tuple[str, dict]:
-    """Single Anthropic messages.create() call using forced tool use (tool_choice
-    = {"type": "tool", "name": "route_message"}) with a tool schema:
-
-    {
-      "name": "route_message",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "intent": {
-            "type": "string",
-            "enum": ["list_courses", "whats_due", "summarize_emails", "search_emails", "unrecognized"]
-          },
-          "due_window_hours": {"type": "integer", "description": "only for whats_due; defaults to 48 if not mentioned"},
-          "due_scope": {"type": "string", "enum": ["due_soon", "all", "overdue", "missing"], "description": "only for whats_due"},
-          "email_count": {"type": "integer", "description": "only for summarize_emails/search_emails; defaults to 10"},
-          "email_sender": {"type": "string", "description": "only for search_emails, if a sender/from was named"},
-          "email_subject": {"type": "string", "description": "only for search_emails, if subject keywords were named"},
-          "email_label": {"type": "string", "description": "only for search_emails, if a label/folder was named"}
+ROUTE_MESSAGE_DECLARATION = types.FunctionDeclaration(
+    name="route_message",
+    description="Classify an inbound WhatsApp message into one supported read command.",
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={
+            "intent": types.Schema(type="STRING", enum=[
+                "list_courses", "whats_due", "summarize_emails", "search_emails", "unrecognized",
+            ]),
+            "due_window_hours": types.Schema(type="INTEGER", description="only for whats_due; defaults to 48 if not mentioned"),
+            "due_scope": types.Schema(type="STRING", enum=["due_soon", "all", "overdue", "missing"], description="only for whats_due"),
+            "email_count": types.Schema(type="INTEGER", description="only for summarize_emails/search_emails; defaults to 10"),
+            "email_sender": types.Schema(type="STRING", description="only for search_emails, if a sender/from was named"),
+            "email_subject": types.Schema(type="STRING", description="only for search_emails, if subject keywords were named"),
+            "email_label": types.Schema(type="STRING", description="only for search_emails, if a label/folder was named"),
         },
-        "required": ["intent"]
-      }
-    }
+        required=["intent"],
+    ),
+)
 
-    System prompt gives the model the exact defaults from
-    docs/product_definition.md's "Ambiguity handling" section (10 most recent
-    unread; 48h due-soon window) so the model fills them in rather than
-    omitting them, and instructs it to classify as "unrecognized" for
+def classify_intent(client: genai.Client, model: str, text: str) -> tuple[str, dict]:
+    """Single client.models.generate_content() call, forcing the model to
+    call route_message via:
+        config=types.GenerateContentConfig(
+            system_instruction=CLASSIFY_SYSTEM_PROMPT,
+            tools=[types.Tool(function_declarations=[ROUTE_MESSAGE_DECLARATION])],
+            tool_config=types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode="ANY", allowed_function_names=["route_message"],
+                )
+            ),
+        )
+    CLASSIFY_SYSTEM_PROMPT gives the model the exact defaults from
+    docs/product_definition.md's "Ambiguity handling" section (10 most
+    recent unread; 48h due-soon window) so the model fills them in rather
+    than omitting them, and instructs it to classify as "unrecognized" for
     anything that isn't clearly one of the four supported read commands
     (drafting/sending/submitting requests included — those are out of scope
     this phase and must fall to the "not yet supported" reply, not be
     silently misrouted to a read node).
 
-    Returns (intent, args_dict) parsed from the tool_use block's `input`.
+    Returns (intent, args_dict) parsed from
+    response.candidates[0].content.parts[0].function_call.args.
     """
 ```
 
-Errors: the Anthropic API call itself can fail (network/5xx/429) — treated
-as a transient error per the general error-handling rule: retried up to 3
-times with backoff (reuse `docs/product_definition.md`'s general policy,
-implemented as a small local retry helper — no new dependency; Anthropic's
-SDK has built-in retry with backoff for 429/5xx already enabled by default
-in the `anthropic` Python SDK, so this is satisfied by using the SDK's
-default `max_retries` rather than hand-rolling it). If retries are exhausted,
-`classify_intent` raises; the graph's top-level node wraps this and sets
-`reply_text = "Couldn't process that message right now — please try again."`
-rather than propagating an unhandled exception to `routes.py`'s blanket
-catch (keeps the "something went wrong" generic message reserved for actual
-bugs, not a modeled/expected API failure).
+Errors: the Gemini API call itself can fail (network/5xx/429) — treated as a
+transient error per the general error-handling rule. `agent/llm.py`
+implements a small local retry helper (up to 3 attempts, exponential
+backoff) wrapping every `generate_content` call — used explicitly rather
+than assumed from the SDK, since `google-genai`'s default retry behavior
+isn't something this spec asserts without verifying it against the installed
+version. If retries are exhausted, `classify_intent` raises; the graph's
+top-level node wraps this and sets `reply_text = "Couldn't process that
+message right now — please try again."` rather than propagating an
+unhandled exception to `routes.py`'s blanket catch (keeps the "something
+went wrong" generic message reserved for actual bugs, not a modeled/expected
+API failure).
 
 ### 7.3 Conditional routing
 
@@ -489,14 +506,15 @@ def build_query(intent_args: dict, unread_only: bool) -> str:
       label:{email_label}, combined with AND (space-joined, Gmail's default),
       omitting any that weren't extracted by the classifier."""
 
-def summarize_emails(client: anthropic.Anthropic, model: str, emails: list[dict]) -> str:
-    """Anthropic messages.create() call (plain text response, no tool use):
-    system prompt sets the docs/product_definition.md tone (formal,
-    structured); user message lists each email's From/Subject/Date/snippet;
-    asks for a concise digest, one entry per email, matching the "brief
-    one-liner per new email" style already established for the Phase 4 email
-    digest (reused here for consistency, even though this is the on-demand
-    path, not the proactive one)."""
+def summarize_emails(client: genai.Client, model: str, emails: list[dict]) -> str:
+    """client.models.generate_content() call (plain text response, no
+    function calling): system_instruction sets the docs/product_definition.md
+    tone (formal, structured); the content lists each email's
+    From/Subject/Date/snippet; asks for a concise digest, one entry per
+    email, matching the "brief one-liner per new email" style already
+    established for the Phase 4 email digest (reused here for consistency,
+    even though this is the on-demand path, not the proactive one). Uses the
+    same retry helper as classify_intent (§7.2)."""
 ```
 
 Node function: given `state["intent"]` and `state["intent_args"]`:
@@ -513,13 +531,13 @@ Node function: given `state["intent"]` and `state["intent_args"]`:
   summarization call) — "search" in `docs/product_definition.md`'s
   capability list ("Read and search inbox") is listing/finding matching
   emails, not summarizing them; only the explicit "Summarize" capability
-  triggers the Anthropic summarization call. If the result list is empty:
+  triggers the Gemini summarization call. If the result list is empty:
   `reply_text = "No emails found matching that."`.
 
 Errors: same shape as §7.4 — Gmail API failures via
 `googleapiclient`'s `num_retries=3`, auth errors reported per §5.3, plain
-failure message on exhaustion. The Anthropic summarization call failing
-follows §7.2's error handling (SDK default retries, then a plain "couldn't
+failure message on exhaustion. The Gemini summarization call failing
+follows §7.2's error handling (local retry helper, then a plain "couldn't
 summarize right now" reply) — distinguished from the Gmail-fetch failure
 message so the user knows which part failed (fetch vs. summarize).
 
@@ -581,13 +599,16 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
     return g.compile(checkpointer=checkpointer)
 ```
 
-Google/Anthropic clients are built once per invocation inside
+Google/Gemini clients are built once per invocation inside
 `classify_intent_node`/`classroom_node`/`gmail_node` (via a small
 `get_google_clients(conn) -> (gmail_service, classroom_service)` helper in
-`agent/google_auth.py`, and a module-level `anthropic.Anthropic(api_key=...)`
+`agent/google_auth.py`, and a module-level `genai.Client(api_key=...)`
 client built once at process startup and passed through `config` — the
-Anthropic client itself is stateless/thread-safe and doesn't need per-request
-construction, unlike the Google credentials which need a freshness check).
+Gemini client itself is stateless/thread-safe and doesn't need per-request
+construction, unlike the Google Workspace credentials which need a
+freshness check). Note this Gemini client is unrelated to the Google
+Workspace OAuth credentials in §5 — it authenticates with a plain API key
+against Google AI Studio, a separate product from Gmail/Classroom/Drive.
 
 ---
 
@@ -596,9 +617,9 @@ construction, unlike the Google credentials which need a freshness check).
 ```python
 def create_app() -> FastAPI:
     """Loads Settings. Opens a psycopg connection pool against DATABASE_URL.
-    Runs PostgresSaver.setup() once. Builds the Anthropic client. Builds the
-    compiled router graph, storing it (plus the pool, settings, anthropic
-    client) on app.state for webhook/routes.py to use.
+    Runs PostgresSaver.setup() once. Builds the Gemini client (genai.Client).
+    Builds the compiled router graph, storing it (plus the pool, settings,
+    genai client) on app.state for webhook/routes.py to use.
     Mounts the webhook router.
     Does NOT start APScheduler in this phase (Phase 4's job)."""
 ```
@@ -639,7 +660,7 @@ in Phase 0).
 |---|---|
 | `agent/config.py` | Implemented (`Settings`, `load_settings`) |
 | `agent/main.py` | Implemented (`create_app`) |
-| `agent/llm.py` | New — `classify_intent`, `summarize_emails` |
+| `agent/llm.py` | New — `classify_intent`, `summarize_emails` (Gemini via `google-genai`) |
 | `agent/google_auth.py` | New — `get_credentials`, `build_gmail_client`, `build_classroom_client` |
 | `agent/setup_google_auth.py` | New — one-time interactive bootstrap CLI |
 | `agent/webhook/routes.py` | Implemented (`GET`/`POST /webhook`) |
@@ -650,10 +671,10 @@ in Phase 0).
 | `agent/graph/nodes/whatsapp_send.py` | Implemented (`send_whatsapp_message`) |
 | `agent/db/schema.sql` | Add `oauth_credentials` table |
 | `agent/db/repo.py` | Implemented (`get_google_credentials`, `save_google_credentials`) |
-| `pyproject.toml` | Add `anthropic` dependency |
-| `.env.example` | Add `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` |
+| `pyproject.toml` | Add `google-genai` dependency |
+| `.env.example` | Add `GEMINI_API_KEY`, `GEMINI_MODEL` |
 | `docs/database_schema.md` | **Recommend updating** to document `oauth_credentials` (not part of this spec's file changes, but should be kept in sync — flagging per §0) |
-| `docs/product_definition.md` | **Recommend updating** Tech stack section to record the new Anthropic API dependency (see §0) |
+| `docs/product_definition.md` | **Recommend updating** Tech stack section to record the new Gemini API dependency (see §0) |
 
 No files under `agent/graph/assignment_graph.py`, `agent/graph/email_graph.py`,
 `agent/graph/nodes/claude_code.py`, `agent/graph/nodes/drive.py`,

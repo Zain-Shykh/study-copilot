@@ -58,8 +58,20 @@ admin-enforced policy.
    (type: Business).
 2. Add the **WhatsApp** product to the app. Meta provisions a free test phone
    number automatically.
-3. In WhatsApp → API Setup, add `helloaidummy@gmail.com`'s WhatsApp number as
-   a verified test recipient (Meta sends a one-time code to that number).
+3. In WhatsApp → API Setup, add the university-account owner's own WhatsApp
+   number as a verified test recipient (Meta sends a one-time code to that
+   number).
+3a. **Required before `verify_whatsapp_send.py` will work**: WhatsApp only
+   allows sending a free-form text message to a recipient within an open
+   24-hour messaging session (opened by the recipient messaging first, or by
+   the business sending an approved template). There's no session yet with a
+   freshly-added test recipient, so from the API Setup dashboard's "Send a
+   message from your test number" panel, send the pre-built template message
+   (e.g. "Order Confirmation") to the verified number, then **reply to it
+   from the phone** (even just "ok"). Only after that reply does the session
+   open both directions — `verify_whatsapp_send.py`'s plain-text send (§3.2)
+   will otherwise fail with a recipient-outside-window error that looks like
+   a bug in the script but isn't one.
 4. Copy from the API Setup page into `.env`: `META_APP_ID`, `META_APP_SECRET`
    (App settings → Basic), the temporary **access token** shown on the API
    Setup page → `META_WHATSAPP_ACCESS_TOKEN` (valid 24h — fine for this
@@ -266,6 +278,13 @@ Errors:
   (Meta's error body includes a human-readable `error.message`), exit 1. No
   retry — this is a one-shot manual check, not the production send path
   (which gets retry/backoff in Phase 1's real error handling).
+- **Expected failure if run before runbook step 1.2.3a**: a recipient with no
+  open 24-hour messaging session rejects free-form text with a 4xx naming the
+  recipient as outside the allowed window. This is not a bug in the script —
+  it means step 1.2.3a (send the dashboard template, reply from the phone)
+  wasn't done yet. The script does not special-case or retry this; it prints
+  the plain error like any other failed request, per the same
+  never-fabricate-success principle as everything else here.
 
 ### 3.3 `scripts/verify_ngrok_tunnel.py`
 

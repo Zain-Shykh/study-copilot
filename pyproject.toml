@@ -4,8 +4,10 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "langgraph",
+    "langchain-core",
     "langgraph-checkpoint-postgres",
     "psycopg[binary]",
+    "psycopg-pool",
     "fastapi",
     "uvicorn",
     "httpx",
@@ -13,7 +15,11 @@ dependencies = [
     "google-auth",
     "google-auth-oauthlib",
     "google-auth-httplib2",
+    "google-genai",
     "pypandoc",
     "apscheduler",
     "python-dotenv",
 ]
+
+[tool.setuptools.packages.find]
+include = ["agent*"]

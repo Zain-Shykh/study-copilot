@@ -29,3 +29,9 @@ CREATE TABLE IF NOT EXISTS claude_sessions (
     claude_session_id     TEXT NOT NULL,
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS oauth_credentials (
+    provider          TEXT PRIMARY KEY,       -- always 'google' in v1 (single provider)
+    credentials_json  TEXT NOT NULL,           -- google.oauth2.credentials.Credentials.to_json()
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);

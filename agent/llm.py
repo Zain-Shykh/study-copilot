@@ -1,0 +1,152 @@
+"""Gemini client wrapper: intent classification and email summarization."""
+
+import time
+
+from google import genai
+from google.genai import types
+
+_MAX_ATTEMPTS = 3
+_BACKOFF_SECONDS = 1.0
+
+CLASSIFY_SYSTEM_PROMPT = """\
+You classify one inbound WhatsApp message into exactly one supported read \
+command by calling route_message. Supported commands:
+
+- list_courses: the user wants to see their enrolled Classroom courses.
+- whats_due: the user is asking about assignments (due soon, all, overdue,
+  or missing). If they don't specify a window, default due_window_hours to
+  48 and due_scope to "due_soon". If they say "everything" or "all
+  assignments", use due_scope "all". If they ask what's overdue, use
+  "overdue". If they ask what they're missing/haven't turned in, use
+  "missing".
+- summarize_emails: the user wants a summary/digest of their emails. If they
+  don't specify a count or filter, default email_count to 10 and assume
+  unread-only.
+- search_emails: the user wants to find/list specific emails (e.g. from a
+  sender, with a subject, in a label/folder) without asking for a summary.
+  Extract whichever of email_sender/email_subject/email_label were
+  mentioned; default email_count to 10 if not specified.
+- unrecognized: anything that isn't clearly one of the above four commands.
+  This includes any request to draft, send, submit, reply to, or turn in
+  something — those are not supported yet and must be classified as
+  unrecognized, never routed to a read command.
+
+Always call route_message exactly once with your best classification.
+"""
+
+ROUTE_MESSAGE_DECLARATION = types.FunctionDeclaration(
+    name="route_message",
+    description="Classify an inbound WhatsApp message into one supported read command.",
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={
+            "intent": types.Schema(
+                type="STRING",
+                enum=[
+                    "list_courses",
+                    "whats_due",
+                    "summarize_emails",
+                    "search_emails",
+                    "unrecognized",
+                ],
+            ),
+            "due_window_hours": types.Schema(
+                type="INTEGER",
+                description="only for whats_due; defaults to 48 if not mentioned",
+            ),
+            "due_scope": types.Schema(
+                type="STRING",
+                enum=["due_soon", "all", "overdue", "missing"],
+                description="only for whats_due",
+            ),
+            "email_count": types.Schema(
+                type="INTEGER",
+                description="only for summarize_emails/search_emails; defaults to 10",
+            ),
+            "email_sender": types.Schema(
+                type="STRING",
+                description="only for search_emails, if a sender/from was named",
+            ),
+            "email_subject": types.Schema(
+                type="STRING",
+                description="only for search_emails, if subject keywords were named",
+            ),
+            "email_label": types.Schema(
+                type="STRING",
+                description="only for search_emails, if a label/folder was named",
+            ),
+        },
+        required=["intent"],
+    ),
+)
+
+SUMMARIZE_SYSTEM_PROMPT = """\
+You write concise, formal email digests for a personal assistant app. Given \
+a list of emails (From/Subject/Date/snippet), produce one short line per \
+email summarizing what it's about. Be factual — do not invent details not \
+present in the snippet. Structured, no preamble, no closing remarks.
+"""
+
+
+def _with_retry(fn):
+    last_error = None
+    for attempt in range(_MAX_ATTEMPTS):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 - transient network/5xx/429 from the API
+            last_error = e
+            if attempt < _MAX_ATTEMPTS - 1:
+                time.sleep(_BACKOFF_SECONDS * (2**attempt))
+    raise last_error
+
+
+def classify_intent(client: genai.Client, model: str, text: str) -> tuple[str, dict]:
+    """Classifies an inbound message into (intent, args) via a forced
+    route_message function call. Raises after 3 failed attempts."""
+
+    def call():
+        return client.models.generate_content(
+            model=model,
+            contents=text,
+            config=types.GenerateContentConfig(
+                system_instruction=CLASSIFY_SYSTEM_PROMPT,
+                tools=[types.Tool(function_declarations=[ROUTE_MESSAGE_DECLARATION])],
+                tool_config=types.ToolConfig(
+                    function_calling_config=types.FunctionCallingConfig(
+                        mode="ANY",
+                        allowed_function_names=["route_message"],
+                    )
+                ),
+            ),
+        )
+
+    response = _with_retry(call)
+    call_ = response.function_calls[0]
+    args = dict(call_.args or {})
+    return args.pop("intent"), args
+
+
+def summarize_emails(client: genai.Client, model: str, emails: list[dict]) -> str:
+    """Returns a concise digest of the given emails as plain text. Raises
+    after 3 failed attempts."""
+    lines = []
+    for email in emails:
+        lines.append(
+            f"From: {email.get('from', '')}\n"
+            f"Subject: {email.get('subject', '')}\n"
+            f"Date: {email.get('date', '')}\n"
+            f"Snippet: {email.get('snippet', '')}"
+        )
+    content = "\n\n".join(lines)
+
+    def call():
+        return client.models.generate_content(
+            model=model,
+            contents=content,
+            config=types.GenerateContentConfig(
+                system_instruction=SUMMARIZE_SYSTEM_PROMPT,
+            ),
+        )
+
+    response = _with_retry(call)
+    return response.text

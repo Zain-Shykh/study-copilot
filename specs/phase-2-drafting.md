@@ -610,23 +610,66 @@ task.add_done_callback(lambda t: (app_state.background_tasks.discard(t), _log_if
 `app.state.background_tasks: set[asyncio.Task]` is initialized in
 `agent/main.py`'s `lifespan` alongside the pool/graph — holding a reference
 is required so the task isn't garbage-collected mid-run (a documented
-`asyncio` footgun); `_log_if_failed` calls `task.exception()` and logs via
-`logger.exception` if the task raised, as a last-resort safety net (mirrors
-`routes.py`'s blanket catch — an actual bug here still shouldn't crash the
-process or go unnoticed).
+`asyncio` footgun).
+
+**How "done" and "message the user" are determined**: there is no polling
+or separate completion check. `run_assignment_flow` makes one sequential
+`await assignment_graph.ainvoke(...)` call; the coroutine simply resumes
+once the whole ingest → draft → save-session → relay pipeline finishes, in
+order, inside that single call. `relay_node` (§9) is the pipeline's last
+node, so the moment the graph run completes *is* the moment the result (or
+a modeled failure like an ingestion/drafting error) gets sent to WhatsApp —
+sending isn't a separate step triggered by detecting completion, it's the
+last thing the pipeline itself does.
+
+That only covers failures the nodes already know how to catch and turn into
+`failure_text` (§7/§8's HttpError/Pandoc/subprocess handling). An
+**unmodeled failure** — a genuine bug raising an uncaught exception anywhere
+in the pipeline — would escape `ainvoke()` before `relay_node` ever runs,
+which without a further safety net would leave the user with only the
+earlier "Starting on X..." message and silence forever, no error visible to
+them at all. `run_assignment_flow` closes this gap the same way
+`routes.py`'s webhook handler already does for the router graph (Phase 1):
 
 ```python
-async def run_assignment_flow(assignment_graph, resolved: dict, sender: str) -> None:
-    """await assignment_graph.ainvoke(
-        {"course_id":..., "course_name":..., "coursework_id":...,
-         "title":..., "sender": sender},
-        config={"configurable": {"thread_id": f"assignment:{course_id}:{coursework_id}",
-                                  "pool": ..., "whatsapp_access_token": ..., "whatsapp_phone_number_id": ...}},
-    )
-    relay_node (inside the assignment graph) already sends the result to
-    WhatsApp — this wrapper exists only to be the asyncio.Task entry point
-    and to catch/log anything that escapes the graph entirely."""
+async def run_assignment_flow(
+    assignment_graph, resolved: dict, sender: str,
+    whatsapp_access_token: str, whatsapp_phone_number_id: str,
+) -> None:
+    """try:
+        await assignment_graph.ainvoke(
+            {"course_id":..., "course_name":..., "coursework_id":...,
+             "title":..., "sender": sender},
+            config={"configurable": {
+                "thread_id": f"assignment:{course_id}:{coursework_id}",
+                "pool": ..., "whatsapp_access_token": whatsapp_access_token,
+                "whatsapp_phone_number_id": whatsapp_phone_number_id,
+            }},
+        )
+        # relay_node already sent the result (success or a modeled
+        # failure) to WhatsApp — nothing further to do here.
+    except Exception:
+        # An actual bug, not a modeled failure — relay_node never got to
+        # run, so the user has had no message since "Starting on X...".
+        # Log it (same as before) AND send a generic failure message
+        # directly, so silence is never the outcome of a real crash.
+        logger.exception("Unhandled error running assignment flow for %s", resolved["title"])
+        try:
+            await send_whatsapp_message(
+                whatsapp_access_token, whatsapp_phone_number_id, sender,
+                f"Something went wrong while working on {resolved['title']} — please try again.",
+            )
+        except Exception:
+            logger.exception("Failed to send failure notice for %s", resolved["title"])
+    """
 ```
+
+`_log_if_failed` (the task's `add_done_callback`) becomes a pure
+last-resort: since `run_assignment_flow` itself now catches everything, the
+callback firing with an exception would only mean something broke in the
+notification path above (e.g. the fallback `send_whatsapp_message` call
+itself raising past its own inner `except`) — still just logged, since at
+that point there is no remaining channel left to notify the user through.
 
 ---
 

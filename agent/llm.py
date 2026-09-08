@@ -26,8 +26,14 @@ command by calling route_message. Supported commands:
   sender, with a subject, in a label/folder) without asking for a summary.
   Extract whichever of email_sender/email_subject/email_label were
   mentioned; default email_count to 10 if not specified.
-- unrecognized: anything that isn't clearly one of the above four commands.
-  This includes any request to draft, send, submit, reply to, or turn in
+- work_on_assignment: the user wants to start drafting/researching a specific
+  assignment (e.g. "work on the bio essay", "start the AI assignment",
+  "draft the technical writing paper"). Extract the free-text name/description
+  they used into assignment_reference. This is the ONLY intent that leads to
+  eventually writing/drafting anything — still just resolves which assignment
+  is meant at this stage, does not draft anything itself.
+- unrecognized: anything that isn't clearly one of the above five commands.
+  This includes any request to send, submit, reply to, or turn in
   something — those are not supported yet and must be classified as
   unrecognized, never routed to a read command.
 
@@ -47,6 +53,7 @@ ROUTE_MESSAGE_DECLARATION = types.FunctionDeclaration(
                     "whats_due",
                     "summarize_emails",
                     "search_emails",
+                    "work_on_assignment",
                     "unrecognized",
                 ],
             ),
@@ -74,6 +81,10 @@ ROUTE_MESSAGE_DECLARATION = types.FunctionDeclaration(
             "email_label": types.Schema(
                 type="STRING",
                 description="only for search_emails, if a label/folder was named",
+            ),
+            "assignment_reference": types.Schema(
+                type="STRING",
+                description="only for work_on_assignment; the free-text name/description the user gave",
             ),
         },
         required=["intent"],
@@ -150,3 +161,101 @@ def summarize_emails(client: genai.Client, model: str, emails: list[dict]) -> st
 
     response = _with_retry(call)
     return response.text
+
+
+CONFIRM_DECLARATION = types.FunctionDeclaration(
+    name="record_confirmation",
+    description="Classify a reply to a yes/no confirmation question.",
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={
+            "answer": types.Schema(type="STRING", enum=["confirm", "decline"]),
+        },
+        required=["answer"],
+    ),
+)
+
+CONFIRM_SYSTEM_PROMPT = """\
+You are told a yes/no question that was just asked, and the user's reply to \
+it. Decide whether the reply confirms ("yes") or declines ("no"). If the \
+reply is unclear, off-topic, or ambiguous, treat it as a decline — do not \
+guess "confirm" without a clear affirmative signal.
+"""
+
+
+def parse_confirmation_reply(client: genai.Client, model: str, question: str, reply_text: str) -> str:
+    """Classifies a reply to a yes/no confirmation question as "confirm" or
+    "decline" via a forced record_confirmation function call. Raises after
+    3 failed attempts."""
+    content = f"Question asked: {question}\nUser's reply: {reply_text}"
+
+    def call():
+        return client.models.generate_content(
+            model=model,
+            contents=content,
+            config=types.GenerateContentConfig(
+                system_instruction=CONFIRM_SYSTEM_PROMPT,
+                tools=[types.Tool(function_declarations=[CONFIRM_DECLARATION])],
+                tool_config=types.ToolConfig(
+                    function_calling_config=types.FunctionCallingConfig(
+                        mode="ANY",
+                        allowed_function_names=["record_confirmation"],
+                    )
+                ),
+            ),
+        )
+
+    response = _with_retry(call)
+    return response.function_calls[0].args["answer"]
+
+
+DISAMBIGUATE_DECLARATION = types.FunctionDeclaration(
+    name="record_choice",
+    description="Classify which numbered candidate a reply refers to, or none.",
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={
+            "choice": types.Schema(
+                type="INTEGER",
+                description="1-based index into the candidate list, or 0 if unclear/none match",
+            ),
+        },
+        required=["choice"],
+    ),
+)
+
+DISAMBIGUATE_SYSTEM_PROMPT = """\
+You are given a numbered list of candidates that were just shown to the \
+user, and the user's reply. Decide which 1-based index they meant. If the \
+reply doesn't clearly pick one of the listed candidates, return 0.
+"""
+
+
+def resolve_disambiguation(client: genai.Client, model: str, candidates: list[dict], reply_text: str) -> int:
+    """Classifies which numbered candidate the reply refers to via a forced
+    record_choice function call. Returns a 1-based index, or 0 if unclear.
+    Raises after 3 failed attempts."""
+    lines = [
+        f"{i + 1}. [{c['course_name']}] {c['title']} — due {c['due'] or 'no due date'}"
+        for i, c in enumerate(candidates)
+    ]
+    content = "Candidates:\n" + "\n".join(lines) + f"\n\nUser's reply: {reply_text}"
+
+    def call():
+        return client.models.generate_content(
+            model=model,
+            contents=content,
+            config=types.GenerateContentConfig(
+                system_instruction=DISAMBIGUATE_SYSTEM_PROMPT,
+                tools=[types.Tool(function_declarations=[DISAMBIGUATE_DECLARATION])],
+                tool_config=types.ToolConfig(
+                    function_calling_config=types.FunctionCallingConfig(
+                        mode="ANY",
+                        allowed_function_names=["record_choice"],
+                    )
+                ),
+            ),
+        )
+
+    response = _with_retry(call)
+    return int(response.function_calls[0].args["choice"])

@@ -92,7 +92,7 @@ def gmail_node(state: RouterState, config: RunnableConfig) -> dict:
         clients = google_auth.load_google_clients(conn)
     if isinstance(clients, str):
         return {"reply_text": clients}
-    gmail_service, _ = clients
+    gmail_service, _, _ = clients
 
     try:
         query = build_query(intent_args, unread_only=(intent == "summarize_emails"))

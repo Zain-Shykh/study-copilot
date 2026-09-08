@@ -1,5 +1,8 @@
 """Composes and sends messages via the Meta Graph API."""
 
+import mimetypes
+from pathlib import Path
+
 import httpx
 
 GRAPH_API_VERSION = "v21.0"
@@ -28,3 +31,43 @@ async def send_whatsapp_message(
         )
     response.raise_for_status()
     return response.json()["messages"][0]["id"]
+
+
+async def send_whatsapp_document(
+    access_token: str, phone_number_id: str, to: str, file_path: Path, caption: str | None = None
+) -> str:
+    """Uploads file_path as media, then sends it as a WhatsApp document
+    message. Returns the sent message's id.
+
+    Raises httpx.HTTPStatusError on either step's failure.
+    """
+    mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+
+    async with httpx.AsyncClient() as client:
+        upload_response = await client.post(
+            f"https://graph.facebook.com/{GRAPH_API_VERSION}/{phone_number_id}/media",
+            headers={"Authorization": f"Bearer {access_token}"},
+            data={"messaging_product": "whatsapp", "type": mime_type},
+            files={"file": (file_path.name, file_path.read_bytes(), mime_type)},
+            timeout=30,
+        )
+        upload_response.raise_for_status()
+        media_id = upload_response.json()["id"]
+
+        document: dict = {"id": media_id, "filename": file_path.name}
+        if caption:
+            document["caption"] = caption
+
+        send_response = await client.post(
+            f"https://graph.facebook.com/{GRAPH_API_VERSION}/{phone_number_id}/messages",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "document",
+                "document": document,
+            },
+            timeout=10,
+        )
+    send_response.raise_for_status()
+    return send_response.json()["messages"][0]["id"]

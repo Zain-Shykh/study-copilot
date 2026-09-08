@@ -82,11 +82,17 @@ async def receive_webhook(request: Request) -> Response:
 
     text = message["text"]["body"]
     msg_id = message["id"]
+    reply_to_message_id = message.get("context", {}).get("id")
 
     try:
         graph = request.app.state.graph
         await graph.ainvoke(
-            {"inbound_text": text, "whatsapp_message_id": msg_id, "sender": sender},
+            {
+                "inbound_text": text,
+                "whatsapp_message_id": msg_id,
+                "sender": sender,
+                "reply_to_message_id": reply_to_message_id,
+            },
             config={
                 "configurable": {
                     "thread_id": f"user:{sender}",
@@ -95,6 +101,8 @@ async def receive_webhook(request: Request) -> Response:
                     "gemini_model": settings.gemini_model,
                     "whatsapp_access_token": settings.meta_whatsapp_access_token,
                     "whatsapp_phone_number_id": settings.meta_whatsapp_phone_number_id,
+                    "assignment_graph": request.app.state.assignment_graph,
+                    "background_tasks": request.app.state.background_tasks,
                 }
             },
         )

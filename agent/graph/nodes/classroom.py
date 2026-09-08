@@ -1,5 +1,6 @@
 """Google Classroom API calls: courses, coursework, announcements, submissions."""
 
+import difflib
 from datetime import datetime, timedelta, timezone
 
 from googleapiclient.errors import HttpError
@@ -133,7 +134,7 @@ def classroom_node(state: RouterState, config: RunnableConfig) -> dict:
         clients = google_auth.load_google_clients(conn)
     if isinstance(clients, str):
         return {"reply_text": clients}
-    _, classroom_service = clients
+    _, classroom_service, _ = clients
 
     try:
         courses = list_courses(classroom_service)
@@ -148,3 +149,35 @@ def classroom_node(state: RouterState, config: RunnableConfig) -> dict:
         reply_text = f"Couldn't reach Classroom right now: {e}"
 
     return {"reply_text": reply_text}
+
+
+def find_assignment_candidates(
+    courses: list[dict], assignments_by_course: dict[str, list[dict]], reference_text: str
+) -> list[dict]:
+    """Scores every assignment against reference_text using
+    difflib.SequenceMatcher on "<course name> <assignment title>" (stdlib
+    only — no new fuzzy-matching dependency). Returns candidates sorted by
+    score descending. Caller applies match-confidence thresholds."""
+    reference = reference_text.lower()
+    candidates: list[dict] = []
+
+    for course in courses:
+        course_id = course["id"]
+        for coursework in assignments_by_course.get(course_id, []):
+            title = coursework["title"]
+            haystack = f"{course['name']} {title}".lower()
+            score = difflib.SequenceMatcher(None, reference, haystack).ratio()
+            due = _due_datetime(coursework)
+            candidates.append(
+                {
+                    "course_id": course_id,
+                    "course_name": course["name"],
+                    "coursework_id": coursework["id"],
+                    "title": title,
+                    "due": due.strftime("%Y-%m-%d %H:%M UTC") if due else None,
+                    "score": score,
+                }
+            )
+
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    return candidates

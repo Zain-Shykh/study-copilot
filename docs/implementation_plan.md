@@ -102,15 +102,25 @@ draft is generated once and sent.
 
 ### Core requirements
 - Assignment thread (`thread_id = "assignment:<course_id>:<coursework_id>"`)
-  created the first time you say "work on this."
+  created once you say "work on this" **and then explicitly confirm**: the
+  router fuzzy-matches your free-text reference against your live Classroom
+  courses/assignments (disambiguating first, via a reply-threaded numbered
+  question, if more than one plausible match), then always asks a final
+  yes/no confirmation before starting anything — resolved via WhatsApp's
+  native reply-to-message, never by guessing at the next message. See
+  `specs/phase-2-drafting.md` §0.3/§6 for the full mechanism.
 - Ingestion node (`ingestion.py`): assembles `source-material/task-brief.md`
   from the CourseWork title+description; resolves each attachment by Drive
   `mimeType` (native Docs exported to Markdown, PDFs left as-is, DOCX/ODT/
   RTF/PPTX converted via Pandoc, images passed through, anything else
   flagged unsupported).
 - Fail-fast ingestion behavior: any attachment failing to download/convert
-  stops the flow before Claude Code runs, and asks you to retry / skip that
-  file / abort — never drafts from incomplete materials.
+  stops the flow before Claude Code runs, reports exactly which file failed
+  and why, and ends that attempt — never drafts from incomplete materials.
+  No retry/skip/abort prompt (that would require pause/resume machinery
+  this phase deliberately doesn't have yet — see
+  `specs/phase-2-drafting.md` §0.1); to retry, re-issue "work on `<X>`" and
+  ingestion runs again from scratch.
 - Claude Code subprocess wrapper (`claude_code.py`): working directory scoped
   to the assignment's own folder, Read/Write limited to `source-material/` in
   and `draft.md` out, plus WebSearch/WebFetch — no Bash, no Google API
@@ -118,8 +128,19 @@ draft is generated once and sent.
 - `claude_sessions` table: records the session ID after the first draft.
 - In-process `asyncio.Lock` around the Claude Code invocation step, so a
   second drafting request queues rather than running concurrently.
-- Draft relay: `draft.md` + a short summary note (sources, assumptions,
-  anything inaccessible) composed into one WhatsApp message.
+- Ingestion + drafting run as a background task, not inline in the webhook
+  request/response cycle — a headless Claude Code run can take minutes,
+  well past what Meta's webhook expects back quickly. The confirmation
+  reply is sent immediately ("Starting on `<assignment>`..."); the draft
+  (or a failure report, including for any unmodeled/unexpected error, not
+  just the ingestion/drafting failures above) is sent as its own separate
+  message once the background task finishes — see
+  `specs/phase-2-drafting.md` §11.
+- Draft relay: `draft.md` sent as a WhatsApp document attachment, followed
+  by a separate short text message with the summary note (sources,
+  assumptions, anything inaccessible) — not crammed into one text message,
+  since a real draft can exceed WhatsApp's ~4096-character text limit and
+  WhatsApp doesn't render Markdown.
 
 ### Out of scope
 The approve/revise/reject loop, `interrupt()`-based pausing, `pending_items`
@@ -130,8 +151,8 @@ tracking, submission prep, `final.docx` generation, Drive upload.
   Google Doc, and plain-text-only materials produces a `draft.md` in the
   correct workspace folder and relays the draft + summary to WhatsApp.
 - An assignment with one corrupted/unsupported attachment triggers the
-  fail-fast prompt (retry / skip / abort) and Claude Code is never invoked
-  with incomplete materials.
+  fail-fast abort-and-report behavior (names the failed file and why) and
+  Claude Code is never invoked with incomplete materials.
 - Requesting two assignments back-to-back, before the first finishes, causes
   the second to wait — verified that only one Claude Code subprocess is ever
   running at a time.

@@ -36,3 +36,20 @@ def save_google_credentials(conn: psycopg.Connection, creds: Credentials) -> Non
             (creds.to_json(),),
         )
     conn.commit()
+
+
+def save_claude_session(conn: psycopg.Connection, assignment_thread_id: str, claude_session_id: str) -> None:
+    """Inserts or updates the Claude Code session ID for an assignment
+    thread, for a future Phase 3 `--resume` revision loop to read back."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO claude_sessions (assignment_thread_id, claude_session_id, updated_at)
+            VALUES (%s, %s, now())
+            ON CONFLICT (assignment_thread_id) DO UPDATE
+                SET claude_session_id = EXCLUDED.claude_session_id,
+                    updated_at = now()
+            """,
+            (assignment_thread_id, claude_session_id),
+        )
+    conn.commit()

@@ -48,6 +48,9 @@ Phases are built in the order laid out in `docs/implementation_plan.md`
    forces a deviation mid-implementation, stop, update the spec, get it
    re-approved, then continue — don't silently drift from what was approved.
 4. Move to the next phase and repeat from step 1.
+5. **IMPORTANT** Do not make decisons yourself. Ask anything if unclear 
+   before making decisions or writing specs. Clarify your concerns and do 
+   not hallucinate or misinterpret anything.
 
 ## Environment setup
 

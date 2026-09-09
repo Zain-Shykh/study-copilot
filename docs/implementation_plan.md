@@ -29,20 +29,25 @@ created and reachable, so Phase 1 can be built without infrastructure blockers.
 - `.env` populated with real values for every placeholder in `.env.example`.
 - Python venv + dependencies installed (already done); Pandoc + PostgreSQL
   system packages confirmed present (already done).
+- Throwaway verification scripts in `scripts/` (outside `agent/`, not part of
+  the real app) proving each credential/service actually works — see
+  Acceptance criteria.
 
 ### Out of scope
-Any application logic — this phase is purely accounts, credentials, and local
-services. No LangGraph, no webhook handling, no Google API calls beyond a
-one-off OAuth verification.
+Real application logic — no LangGraph graphs, no webhook handling beyond a
+placeholder route, no `agent/` code. The verification scripts in `scripts/`
+are disposable checks, not part of the app; nothing built here is imported by
+`agent/` in later phases.
 
 ### Acceptance criteria
 - `psql $DATABASE_URL -c '\dt'` connects and lists the four app tables.
-- A one-off script completes the Google OAuth flow and prints your Gmail
-  profile address.
-- A message sent via the Meta Graph API using the test number and test
-  recipient arrives on your phone.
-- The ngrok tunnel is reachable at the static domain and returns 200 on a
-  placeholder FastAPI route.
+- `scripts/verify_google_oauth.py` completes the Google OAuth flow and prints
+  your Gmail profile address.
+- `scripts/verify_whatsapp_send.py` sends a message via the Meta Graph API
+  using the test number and test recipient, and it arrives on your phone.
+- `scripts/verify_ngrok_tunnel.py` (or equivalent) stands up a placeholder
+  FastAPI route and confirms it's reachable at the ngrok static domain,
+  returning 200.
 - `.venv/bin/python -c "import agent"` succeeds with no import errors.
 
 ---

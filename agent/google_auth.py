@@ -45,15 +45,20 @@ def build_classroom_client(creds: Credentials) -> Resource:
     return build("classroom", "v1", credentials=creds)
 
 
-def get_google_clients(conn: psycopg.Connection) -> tuple[Resource, Resource]:
+def build_drive_client(creds: Credentials) -> Resource:
+    return build("drive", "v3", credentials=creds)
+
+
+def get_google_clients(conn: psycopg.Connection) -> tuple[Resource, Resource, Resource]:
     """Convenience helper for graph nodes: refreshes credentials once, then
-    builds both the Gmail and Classroom clients from them."""
+    builds the Gmail, Classroom, and Drive clients from them."""
     creds = get_credentials(conn)
-    return build_gmail_client(creds), build_classroom_client(creds)
+    return build_gmail_client(creds), build_classroom_client(creds), build_drive_client(creds)
 
 
-def load_google_clients(conn: psycopg.Connection) -> tuple[Resource, Resource] | str:
-    """Builds (gmail_service, classroom_service) for a graph node to use.
+def load_google_clients(conn: psycopg.Connection) -> tuple[Resource, Resource, Resource] | str:
+    """Builds (gmail_service, classroom_service, drive_service) for a graph
+    node to use.
 
     On failure (never bootstrapped, or the refresh token was revoked/
     expired) returns the user-facing reply text instead of raising — both

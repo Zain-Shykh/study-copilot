@@ -1,6 +1,7 @@
 """Main/router thread graph — handles on-demand commands not tied to one in-flight item."""
 
 import asyncio
+import difflib
 import logging
 
 import httpx
@@ -8,8 +9,10 @@ from googleapiclient.errors import HttpError
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command
 
 from agent import google_auth, llm
+from agent.db import repo
 from agent.graph.nodes import classroom
 from agent.graph.nodes.classroom import classroom_node
 from agent.graph.nodes.gmail import gmail_node
@@ -25,8 +28,9 @@ FALLBACK_REPLY = (
     "work on an assignment."
 )
 
-# Tunable starting thresholds for resolving "work on <assignment>" — adjust
-# after real-world testing, not asserted as final. See spec §0.3/§6.6.
+# Tunable starting thresholds for resolving "work on <assignment>" (and,
+# per Phase 3, "which pending item did you mean") — adjust after
+# real-world testing, not asserted as final. See spec §0.3/§6.6.
 _CONFIDENT_MATCH_SCORE = 0.6
 _CONFIDENT_MATCH_MARGIN = 0.15
 _DISAMBIGUATION_MIN_SCORE = 0.35
@@ -38,28 +42,48 @@ NO_MATCH_REPLY = (
 )
 
 
-def route_entry_node(state: RouterState) -> dict:
-    """If this inbound message is a reply to the currently pending
-    question, leaves pending_question untouched so the next node can
-    consume it. Otherwise silently abandons any pending question — no
-    "still waiting" nudge — so the message is classified as an independent
-    command instead."""
+def _find_targeted_pending_item(state: RouterState, config: RunnableConfig) -> dict | None:
+    """Reply-to-message lookup only — unambiguous when it hits. A fresh
+    message or a reply to something not currently tracked falls through to
+    the by-name respond_to_pending intent instead (§6.3), since that needs
+    classify_intent's output first."""
+    reply_to = state.get("reply_to_message_id")
+    if not reply_to:
+        return None
+    pool = config["configurable"]["pool"]
+    with pool.connection() as conn:
+        return repo.get_pending_item(conn, reply_to)
+
+
+def route_entry_node(state: RouterState, config: RunnableConfig) -> dict:
+    """Resets this turn's transient fields, then checks (in priority
+    order): a reply to the router's own pending confirm/disambiguate
+    question (Phase 2 mechanism, scoped to this thread — leaves
+    pending_question in place for the next node to consume), then whether
+    this message targets a currently-pending assignment item via
+    WhatsApp's reply-to-message feature. Otherwise this turn starts as an
+    independent command."""
     pending_question = state.get("pending_question")
     if pending_question is not None and state.get("reply_to_message_id") == pending_question.get(
         "message_id"
     ):
-        return {}
-    return {"pending_question": None}
+        return {"reply_text": None}
+
+    item = _find_targeted_pending_item(state, config)
+    return {"pending_question": None, "reply_text": None, "matched_pending_item": item}
 
 
 def route_after_entry(state: RouterState) -> str:
     pending_question = state.get("pending_question")
-    if pending_question is None:
-        return "classify_intent"
-    return {
-        "disambiguate_assignment": "handle_disambiguation",
-        "confirm_start_assignment": "handle_confirmation",
-    }[pending_question["kind"]]
+    if pending_question is not None:
+        return {
+            "disambiguate_assignment": "handle_disambiguation",
+            "confirm_start_assignment": "handle_confirmation",
+            "disambiguate_pending_item": "handle_pending_item_disambiguation",
+        }[pending_question["kind"]]
+    if state.get("matched_pending_item") is not None:
+        return "handle_pending_item_reply"
+    return "classify_intent"
 
 
 def classify_intent_node(state: RouterState, config: RunnableConfig) -> dict:
@@ -86,6 +110,7 @@ def route_after_classify(state: RouterState) -> str:
         "summarize_emails": "gmail_node",
         "search_emails": "gmail_node",
         "work_on_assignment": "resolve_assignment",
+        "respond_to_pending": "resolve_pending_item",
         "unrecognized": "fallback_node",
     }[state["intent"]]
 
@@ -233,8 +258,167 @@ async def run_assignment_flow(
             logger.exception("Failed to send failure notice for %s", resolved["title"])
 
 
-def handle_confirmation_node(state: RouterState, config: RunnableConfig) -> dict:
-    """pending_question["kind"] == "confirm_start_assignment"."""
+async def resume_assignment_thread(
+    assignment_graph,
+    thread_id: str,
+    pending_item_message_id: str,
+    reply_text: str,
+    sender: str,
+    whatsapp_access_token: str,
+    whatsapp_phone_number_id: str,
+    pool,
+    genai_client,
+    gemini_model: str,
+) -> None:
+    """Resumes an assignment thread paused at interrupt() with the user's
+    reply text. Per Decision #3, this never sends an ack itself — the
+    graph's own parse_review_node/parse_submit_node are the sole source of
+    any outbound message for a modeled outcome (approve/revise/reject/
+    confirm/decline), including sending nothing at all for reject/decline.
+    Only an unmodeled crash (the graph raising before reaching one of
+    those nodes) gets a generic failure message here, mirroring
+    run_assignment_flow's own top-level try/except."""
+    try:
+        await assignment_graph.ainvoke(
+            Command(resume=reply_text),
+            config={
+                "configurable": {
+                    "thread_id": thread_id,
+                    "pool": pool,
+                    "whatsapp_access_token": whatsapp_access_token,
+                    "whatsapp_phone_number_id": whatsapp_phone_number_id,
+                    "genai_client": genai_client,
+                    "gemini_model": gemini_model,
+                    "_pending_item_message_id": pending_item_message_id,
+                }
+            },
+        )
+    except Exception:
+        logger.exception("Unhandled error resuming assignment thread %s", thread_id)
+        try:
+            await send_whatsapp_message(
+                whatsapp_access_token,
+                whatsapp_phone_number_id,
+                sender,
+                "Something went wrong processing that reply — please try again.",
+            )
+        except Exception:
+            logger.exception("Failed to send failure notice for thread %s", thread_id)
+
+
+def _dispatch_pending_resume(item: dict, reply_text: str, state: RouterState, config: RunnableConfig) -> None:
+    configurable = config["configurable"]
+    task = asyncio.create_task(
+        resume_assignment_thread(
+            configurable["assignment_graph"],
+            item["thread_id"],
+            item["message_id"],
+            reply_text,
+            state["sender"],
+            configurable["whatsapp_access_token"],
+            configurable["whatsapp_phone_number_id"],
+            configurable["pool"],
+            configurable["genai_client"],
+            configurable["gemini_model"],
+        )
+    )
+    background_tasks = configurable["background_tasks"]
+    background_tasks.add(task)
+    task.add_done_callback(lambda t: (background_tasks.discard(t), _log_if_failed(t)))
+
+
+async def handle_pending_item_reply(state: RouterState, config: RunnableConfig) -> dict:
+    """The reply-to-message case: state["matched_pending_item"] was
+    resolved unambiguously by route_entry_node. Dispatches the resume as a
+    background task and returns no reply_text — see Decision #3.
+
+    Must be async (not sync def): a sync node is offloaded by LangGraph to
+    a worker thread with no running event loop, and asyncio.create_task
+    (inside _dispatch_pending_resume) requires one — confirmed against the
+    installed langgraph version while implementing this phase."""
+    item = state["matched_pending_item"]
+    _dispatch_pending_resume(item, state["inbound_text"], state, config)
+    return {}
+
+
+async def resolve_pending_item_node(state: RouterState, config: RunnableConfig) -> dict:
+    """The by-name (non-reply-to) case, reached via the respond_to_pending
+    intent. Fuzzy-matches intent_args["pending_item_reference"] against
+    every currently-pending assignment item's display_name."""
+    pool = config["configurable"]["pool"]
+    reference_text = state.get("intent_args", {}).get("pending_item_reference", "")
+
+    with pool.connection() as conn:
+        items = repo.list_pending_items(conn, "assignment")
+
+    if not items:
+        return {"reply_text": "There's nothing pending right now."}
+
+    if len(items) == 1:
+        # Only one thing it could be, regardless of match confidence.
+        _dispatch_pending_resume(items[0], state["inbound_text"], state, config)
+        return {}
+
+    if not reference_text.strip():
+        # No name given at all (e.g. a bare "yes") with more than one item
+        # pending — this isn't "zero matches found", it's "nothing to score
+        # against", so ask among all of them rather than reporting no match.
+        lines = [f'{i + 1}. {c["display_name"]}' for i, c in enumerate(items)]
+        return {
+            "reply_text": "Which one did you mean?\n" + "\n".join(lines),
+            "pending_question": {
+                "kind": "disambiguate_pending_item",
+                "message_id": None,
+                "candidates": items,
+                "original_text": state["inbound_text"],
+            },
+        }
+
+    candidates = []
+    for item in items:
+        score = difflib.SequenceMatcher(
+            None, reference_text.lower(), item["display_name"].lower()
+        ).ratio()
+        candidates.append({**item, "score": score})
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+
+    best = candidates[0]
+    second_score = candidates[1]["score"]
+    if best["score"] >= _CONFIDENT_MATCH_SCORE and (best["score"] - second_score) >= _CONFIDENT_MATCH_MARGIN:
+        _dispatch_pending_resume(best, state["inbound_text"], state, config)
+        return {}
+
+    shortlisted = [c for c in candidates if c["score"] >= _DISAMBIGUATION_MIN_SCORE][
+        :_DISAMBIGUATION_MAX_CANDIDATES
+    ]
+    if not shortlisted:
+        return {"reply_text": "I couldn't find a pending item matching that — try naming it differently."}
+    if len(shortlisted) == 1:
+        _dispatch_pending_resume(shortlisted[0], state["inbound_text"], state, config)
+        return {}
+
+    lines = [f'{i + 1}. {c["display_name"]}' for i, c in enumerate(shortlisted)]
+    return {
+        "reply_text": "Which one did you mean?\n" + "\n".join(lines),
+        "pending_question": {
+            "kind": "disambiguate_pending_item",
+            "message_id": None,
+            "candidates": shortlisted,
+            "original_text": state["inbound_text"],
+        },
+    }
+
+
+async def handle_confirmation_node(state: RouterState, config: RunnableConfig) -> dict:
+    """pending_question["kind"] == "confirm_start_assignment".
+
+    Async (not sync def) for the same reason as handle_pending_item_reply
+    — this node's asyncio.create_task(run_assignment_flow(...)) call needs
+    a running event loop, which a sync node doesn't get (LangGraph offloads
+    sync nodes to a worker thread). Pre-existing Phase 2 code had this as
+    a sync def; fixed while touching this file for Phase 3, since the same
+    bug would otherwise silently break "work on <assignment>" confirmations
+    in production."""
     configurable = config["configurable"]
     pending_question = state["pending_question"]
     resolved = pending_question["resolved"]
@@ -277,10 +461,14 @@ def handle_disambiguation_node(state: RouterState, config: RunnableConfig) -> di
     configurable = config["configurable"]
     pending_question = state["pending_question"]
     candidates = pending_question["candidates"]
+    lines = [
+        f'{i + 1}. [{c["course_name"]}] {c["title"]} — due {c["due"] or "no due date"}'
+        for i, c in enumerate(candidates)
+    ]
 
     try:
         choice = llm.resolve_disambiguation(
-            configurable["genai_client"], configurable["gemini_model"], candidates, state["inbound_text"]
+            configurable["genai_client"], configurable["gemini_model"], lines, state["inbound_text"]
         )
     except Exception:
         logger.exception("resolve_disambiguation failed after retries")
@@ -298,14 +486,53 @@ def handle_disambiguation_node(state: RouterState, config: RunnableConfig) -> di
     return _confirm_reply(candidates[choice - 1])
 
 
+async def handle_pending_item_disambiguation_node(state: RouterState, config: RunnableConfig) -> dict:
+    """pending_question["kind"] == "disambiguate_pending_item"."""
+    configurable = config["configurable"]
+    pending_question = state["pending_question"]
+    candidates = pending_question["candidates"]
+    original_text = pending_question["original_text"]
+    lines = [f'{i + 1}. {c["display_name"]}' for i, c in enumerate(candidates)]
+
+    try:
+        choice = llm.resolve_disambiguation(
+            configurable["genai_client"], configurable["gemini_model"], lines, state["inbound_text"]
+        )
+    except Exception:
+        logger.exception("resolve_disambiguation failed after retries")
+        return {
+            "reply_text": "Couldn't process that reply right now — please try again.",
+            "pending_question": None,
+        }
+
+    if choice < 1 or choice > len(candidates):
+        return {
+            "reply_text": "Sorry, I couldn't tell which one you meant — try naming it differently.",
+            "pending_question": None,
+        }
+
+    # Resuming uses the user's *original* respond_to_pending reply
+    # (their actual approve/revise/reject/confirm content), not this
+    # disambiguation answer — and, per Decision #3, sends no ack.
+    _dispatch_pending_resume(candidates[choice - 1], original_text, state, config)
+    return {"pending_question": None}
+
+
 async def send_reply_node(state: RouterState, config: RunnableConfig) -> dict:
+    reply_text = state.get("reply_text")
+    if not reply_text:
+        # A pending-item resume was dispatched with no ack (Decision #3),
+        # or a disambiguation resolved straight into one — legitimately
+        # nothing to send this turn.
+        return {}
+
     configurable = config["configurable"]
     access_token = configurable["whatsapp_access_token"]
     phone_number_id = configurable["whatsapp_phone_number_id"]
 
     try:
         message_id = await send_whatsapp_message(
-            access_token, phone_number_id, state["sender"], state["reply_text"]
+            access_token, phone_number_id, state["sender"], reply_text
         )
     except httpx.HTTPStatusError:
         logger.exception("Failed to send WhatsApp reply to %s", state["sender"])
@@ -324,8 +551,11 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
     g.add_node("route_entry", route_entry_node)
     g.add_node("classify_intent", classify_intent_node)
     g.add_node("resolve_assignment", resolve_assignment_node)
+    g.add_node("resolve_pending_item", resolve_pending_item_node)
     g.add_node("handle_confirmation", handle_confirmation_node)
     g.add_node("handle_disambiguation", handle_disambiguation_node)
+    g.add_node("handle_pending_item_reply", handle_pending_item_reply)
+    g.add_node("handle_pending_item_disambiguation", handle_pending_item_disambiguation_node)
     g.add_node("classroom_node", classroom_node)
     g.add_node("gmail_node", gmail_node)
     g.add_node("fallback_node", fallback_node)
@@ -339,6 +569,8 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
             "classify_intent": "classify_intent",
             "handle_confirmation": "handle_confirmation",
             "handle_disambiguation": "handle_disambiguation",
+            "handle_pending_item_disambiguation": "handle_pending_item_disambiguation",
+            "handle_pending_item_reply": "handle_pending_item_reply",
         },
     )
     g.add_conditional_edges(
@@ -349,6 +581,7 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
             "gmail_node": "gmail_node",
             "fallback_node": "fallback_node",
             "resolve_assignment": "resolve_assignment",
+            "resolve_pending_item": "resolve_pending_item",
             "send_reply": "send_reply",
         },
     )
@@ -357,8 +590,11 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
         "gmail_node",
         "fallback_node",
         "resolve_assignment",
+        "resolve_pending_item",
         "handle_confirmation",
         "handle_disambiguation",
+        "handle_pending_item_reply",
+        "handle_pending_item_disambiguation",
     ):
         g.add_edge(node_name, "send_reply")
     g.add_edge("send_reply", END)

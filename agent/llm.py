@@ -32,10 +32,18 @@ command by calling route_message. Supported commands:
   they used into assignment_reference. This is the ONLY intent that leads to
   eventually writing/drafting anything — still just resolves which assignment
   is meant at this stage, does not draft anything itself.
-- unrecognized: anything that isn't clearly one of the above five commands.
+- respond_to_pending: the user is making a decision about a draft or
+  pending item they were previously shown — approving it, asking for
+  changes, rejecting it, or answering a submit yes/no question — whether
+  or not they name which one. Includes replies like "yes", "looks good",
+  "make it shorter", "no", "reject it", "approve the bio essay". If they
+  name a specific course/assignment, extract it into
+  pending_item_reference; leave it unset if they didn't name one.
+- unrecognized: anything that isn't clearly one of the above commands.
   This includes any request to send, submit, reply to, or turn in
-  something — those are not supported yet and must be classified as
-  unrecognized, never routed to a read command.
+  something that isn't a reply to a pending item — those are not
+  supported yet and must be classified as unrecognized, never routed to a
+  read command.
 
 Always call route_message exactly once with your best classification.
 """
@@ -54,6 +62,7 @@ ROUTE_MESSAGE_DECLARATION = types.FunctionDeclaration(
                     "summarize_emails",
                     "search_emails",
                     "work_on_assignment",
+                    "respond_to_pending",
                     "unrecognized",
                 ],
             ),
@@ -85,6 +94,10 @@ ROUTE_MESSAGE_DECLARATION = types.FunctionDeclaration(
             "assignment_reference": types.Schema(
                 type="STRING",
                 description="only for work_on_assignment; the free-text name/description the user gave",
+            ),
+            "pending_item_reference": types.Schema(
+                type="STRING",
+                description="only for respond_to_pending, if a specific item was named",
             ),
         },
         required=["intent"],
@@ -231,15 +244,14 @@ reply doesn't clearly pick one of the listed candidates, return 0.
 """
 
 
-def resolve_disambiguation(client: genai.Client, model: str, candidates: list[dict], reply_text: str) -> int:
+def resolve_disambiguation(client: genai.Client, model: str, candidate_lines: list[str], reply_text: str) -> int:
     """Classifies which numbered candidate the reply refers to via a forced
-    record_choice function call. Returns a 1-based index, or 0 if unclear.
-    Raises after 3 failed attempts."""
-    lines = [
-        f"{i + 1}. [{c['course_name']}] {c['title']} — due {c['due'] or 'no due date'}"
-        for i, c in enumerate(candidates)
-    ]
-    content = "Candidates:\n" + "\n".join(lines) + f"\n\nUser's reply: {reply_text}"
+    record_choice function call. candidate_lines are pre-formatted "N. ..."
+    display lines, in the same order as the caller's candidate list — kept
+    generic (rather than a fixed dict shape) so it works for both
+    assignment-shaped and pending-item-shaped candidates. Returns a
+    1-based index, or 0 if unclear. Raises after 3 failed attempts."""
+    content = "Candidates:\n" + "\n".join(candidate_lines) + f"\n\nUser's reply: {reply_text}"
 
     def call():
         return client.models.generate_content(
@@ -259,3 +271,58 @@ def resolve_disambiguation(client: genai.Client, model: str, candidates: list[di
 
     response = _with_retry(call)
     return int(response.function_calls[0].args["choice"])
+
+
+REVIEW_DECLARATION = types.FunctionDeclaration(
+    name="record_review",
+    description="Classify a reply to a draft that was just shown for review.",
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={
+            "decision": types.Schema(type="STRING", enum=["approve", "revise", "reject"]),
+            "feedback": types.Schema(
+                type="STRING",
+                description="only for revise: the requested changes, as given",
+            ),
+        },
+        required=["decision"],
+    ),
+)
+
+REVIEW_SYSTEM_PROMPT = """\
+A draft was just sent to the user for review. Classify their reply:
+- approve: a clear affirmative ("yes", "looks good", "approved", "send it").
+- reject: an explicit rejection ("no", "reject", "discard", "scrap it").
+- revise: anything read as feedback or requested changes ("make this
+  shorter", "add a source about X", "fix the intro") — extract the
+  requested changes into feedback.
+If the reply is unclear, off-topic, or doesn't fit approve/reject cleanly,
+classify it as revise with feedback set to the reply text verbatim — this
+keeps the draft alive for another round instead of silently discarding it
+(reject) or advancing it without a real approval (approve).
+"""
+
+
+def parse_review_reply(client: genai.Client, model: str, reply_text: str) -> tuple[str, str | None]:
+    """Classifies a draft-review reply into ("approve"|"revise"|"reject",
+    feedback). feedback is only non-None for "revise". Raises after 3
+    failed attempts."""
+
+    def call():
+        return client.models.generate_content(
+            model=model,
+            contents=reply_text,
+            config=types.GenerateContentConfig(
+                system_instruction=REVIEW_SYSTEM_PROMPT,
+                tools=[types.Tool(function_declarations=[REVIEW_DECLARATION])],
+                tool_config=types.ToolConfig(
+                    function_calling_config=types.FunctionCallingConfig(
+                        mode="ANY", allowed_function_names=["record_review"],
+                    )
+                ),
+            ),
+        )
+
+    response = _with_retry(call)
+    args = response.function_calls[0].args
+    return args["decision"], args.get("feedback")

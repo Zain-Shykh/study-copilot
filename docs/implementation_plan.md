@@ -181,12 +181,14 @@ draft) but reviewing it and submitting are two separate approval-gated steps.
   (matches the Permission Matrix having "Draft: Auto" and "Submit: Approval
   required" as distinct rows) — only on explicit approval here does the
   submission-prep node run.
-- Submission-prep node: Pandoc `draft.md` → `final.docx`, upload to Drive
-  (`drive.file` scope), set sharing permissions for the teacher, send a
-  "ready to submit" link — you do the final "Turn in" click in Classroom.
-- Same `interrupt()` + three-way fork pattern added to the email-draft graph,
-  single interrupt (send approval) since there's no separate prep stage —
-  approving sends immediately via Gmail.
+- Submission-prep node: mechanically executes the `submission_manifest.json`
+  Claude Code declared (zip via stdlib `zipfile`, PDF/DOCX via Pandoc, or
+  upload as-is), uploads the result to Drive (`drive.file` scope, no sharing-
+  permissions step needed — Classroom's own attach flow grants teacher
+  access), sends a "ready to submit" link — you do the final "Turn in" click
+  in Classroom. See `specs/phase-3-approval-submission.md` Decisions #2/#8.
+- The email-draft graph's own `interrupt()` + three-way fork is deferred along
+  with email drafting itself (see acceptance criteria note below).
 - Reply routing wired for both graphs: exact match via `pending_items` on
   reply-to-message, fuzzy `display_name` match in the router thread otherwise,
   falling back to asking you to disambiguate only when genuinely unclear.
@@ -212,8 +214,14 @@ directly (deferred to v2 per the spec — v1 is manual-link handoff only).
   nothing — the next reply resumes it correctly.
 - Restarting the process while Claude Code is actively running produces a
   heads-up message on the next startup naming the interrupted assignment.
-- Approving an email draft sends it via Gmail; rejecting discards it;
-  revising regenerates it — same three-way loop as assignments.
+
+Email drafting was never built in Phase 1/2 (only assignment drafting was),
+so this phase's approval loop covers assignments only — email drafting and
+its own approval loop are deferred to a future phase. (Originally this
+phase's acceptance criteria included "Approving an email draft sends it via
+Gmail; rejecting discards it; revising regenerates it" — dropped here since
+there is no email-drafting engine yet for it to apply to; see
+`specs/phase-3-approval-submission.md` Decision #1.)
 
 ---
 

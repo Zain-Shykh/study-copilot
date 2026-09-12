@@ -60,9 +60,13 @@ write step — can research, draft, and submit homework assignments.
 ### Submission
 - Prepare the finished work in your Drive
 - **Approval required every time** — after approval:
-  - **v1**: agent uploads the final file to Drive, sets sharing permissions so
-    your teacher can open it, and sends you a "ready to submit" link — you do
-    the final "Turn in" click yourself in Classroom. Chosen over the API path
+  - **v1**: agent packages the approved work in whatever format that
+    assignment's own guidelines call for (code files, a zip, a PDF, a doc,
+    etc. — decided by Claude Code, see Claude Code interaction contract),
+    uploads it to Drive, and sends you a "ready to submit" link — you do
+    the final "Turn in" click yourself in Classroom (Add or create → Drive,
+    which handles granting your teacher access to whatever you attach — no
+    separate sharing-permissions step needed). Chosen over the API path
     because a failed/partial API turn-in can silently leave a teacher with a
     submission marked "turned in" that they can't actually open (see risks below).
   - **Later (v2+)**: revisit calling the Classroom API directly
@@ -83,8 +87,9 @@ write step — can research, draft, and submit homework assignments.
 - Single user (you) — no multi-user/family accounts
 - No group/collaborative assignments
 - No plagiarism/citation-formatting checking
-- No non-text assignment types (quizzes, code submissions, video) — writing-style
-  assignments only, to start
+- No non-file-based assignment types (quizzes, short-answer coursework, video) —
+  any file-based response (writing, code, or otherwise) is in scope, as long as
+  it follows the assignment's own stated submission guidelines
 
 ---
 
@@ -250,6 +255,14 @@ conversion step. On Ubuntu:
 ```
 sudo apt update && sudo apt install -y pandoc
 ```
+Producing a real PDF submission (when an assignment's guidelines call for one)
+also needs a PDF engine, since Pandoc alone doesn't render one — `wkhtmltopdf`
+is the smallest option (over a full LaTeX toolchain):
+```
+sudo apt install -y wkhtmltopdf
+```
+Not needed for zip/as-is submissions (e.g. code assignments) — only ones whose
+stated format is PDF.
 
 ### Claude Code interaction contract
 When you say "work on this"/"draft this assignment", the LangGraph app hands
@@ -259,8 +272,8 @@ API token billing) as the actual drafting engine, scoped tightly per assignment:
 - **Working directory & tool scope**: invoked with its working directory set
   to that assignment's own folder
   (`~/agent-workspace/<course>/<assignment>/`), permitted to read/write only
-  within it (`source-material/` in, `draft.md` out) plus WebSearch/WebFetch
-  for research. No Bash, no broader filesystem access, and critically no
+  within it (`source-material/` in, `submission/` + `submission_manifest.json`
+  out) plus WebSearch/WebFetch for research. No Bash, no broader filesystem access, and critically no
   access to Gmail/Classroom/Drive credentials — this session is structurally
   incapable of sending or submitting anything, even in principle. That stays
   the exclusive job of the main agent's gated actions.
@@ -341,18 +354,29 @@ data. Beyond that, behavior depends on the failure type:
    ~/agent-workspace/
      <course-name>/
        <assignment-name>/
-         source-material/   ← downloaded attachments from Classroom
-         draft.md           ← Claude's working draft, sent to WhatsApp for review
-         final.docx          ← approved version, only this gets uploaded to Drive
+         source-material/          ← downloaded attachments from Classroom
+         submission/                ← Claude's working response, one or more files,
+                                       organized into subfolders if the assignment's
+                                       required structure calls for it; sent to
+                                       WhatsApp for review as-is
+         submission_manifest.json  ← declares how submission/ should be packaged
+                                       (as-is / zip / pdf / docx) — written by Claude
+                                       Code, executed mechanically at submission time
    ```
    Folders are **persistent** (kept after submission, not cleaned up) so past work
    stays browsable in Finder/Explorer. Drive is only touched at the last step —
-   uploading the approved final file, since that's what the Classroom submission
-   API requires.
-6. **Final file conversion**: `final.docx` is produced from the approved
-   `draft.md` using **Pandoc** (`pandoc draft.md -o final.docx`) — the same
-   dependency already used in reverse for ingesting DOCX/ODT/RTF/PPTX
-   attachments, so no new tool is introduced just for this direction.
+   uploading the packaged submission, since that's what the Classroom submission
+   flow requires.
+6. **Final file packaging**: the format/structure of a submission is
+   per-assignment, read from the assignment's own stated guidelines (already
+   captured in `source-material/task-brief.md`) and decided by Claude Code —
+   never a single fixed output type. Claude Code declares the packaging plan in
+   `submission_manifest.json`; the main agent executes it mechanically at
+   submission time — bundling into a `.zip` (stdlib `zipfile`, preserving
+   whatever folder structure Claude Code laid out), converting to `.pdf`/`.docx`
+   via **Pandoc** (the same dependency already used in reverse for ingesting
+   DOCX/ODT/RTF/PPTX attachments), or uploading files as-is — never
+   interpreting the assignment's content or guidelines itself.
 7. **Local state store**: a single local **PostgreSQL** database holds all
    persistent state — LangGraph's own approval/interrupt checkpoints (via
    `langgraph-checkpoint-postgres`, so a pending approval survives a machine
@@ -419,7 +443,11 @@ data. Beyond that, behavior depends on the failure type:
 
 ### Document conversion
 - **Pandoc** (system binary, `sudo apt install -y pandoc`) — DOCX/ODT/RTF/PPTX
-  → Markdown on the way in, Markdown → `final.docx` on the way out
+  → Markdown on the way in, Markdown → `.docx`/`.pdf` on the way out (when an
+  assignment's own guidelines call for that format; other formats are zipped
+  or uploaded as-is instead — see Local Workspace layout)
+- `wkhtmltopdf` (system binary, `sudo apt install -y wkhtmltopdf`) — PDF engine
+  Pandoc calls out to for `.pdf` output specifically
 - `pypandoc` — thin Python wrapper around the Pandoc binary, instead of
   hand-rolling subprocess calls
 

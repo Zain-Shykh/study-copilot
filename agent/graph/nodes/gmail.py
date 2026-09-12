@@ -10,6 +10,28 @@ from agent.llm import summarize_emails
 _FILTER_ARGS = ("email_sender", "email_subject", "email_label")
 
 
+def _get_message_metadata(gmail_service, message_id: str) -> dict:
+    msg = (
+        gmail_service.users()
+        .messages()
+        .get(
+            userId="me",
+            id=message_id,
+            format="metadata",
+            metadataHeaders=["From", "Subject", "Date"],
+        )
+        .execute(num_retries=3)
+    )
+    headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+    return {
+        "id": msg["id"],
+        "from": headers.get("From", ""),
+        "subject": headers.get("Subject", ""),
+        "date": headers.get("Date", ""),
+        "snippet": msg.get("snippet", ""),
+    }
+
+
 def list_messages(gmail_service, query: str, max_results: int) -> list[dict]:
     response = (
         gmail_service.users()
@@ -17,32 +39,50 @@ def list_messages(gmail_service, query: str, max_results: int) -> list[dict]:
         .list(userId="me", q=query, maxResults=max_results)
         .execute(num_retries=3)
     )
-    message_refs = response.get("messages", [])
+    return [_get_message_metadata(gmail_service, ref["id"]) for ref in response.get("messages", [])]
 
-    emails = []
-    for ref in message_refs:
-        msg = (
-            gmail_service.users()
-            .messages()
-            .get(
-                userId="me",
-                id=ref["id"],
-                format="metadata",
-                metadataHeaders=["From", "Subject", "Date"],
+
+def get_current_history_id(gmail_service) -> str:
+    """Current historyId — used both to establish/reset the checkpoint
+    baseline and to advance it after a successful poll."""
+    return gmail_service.users().getProfile(userId="me").execute(num_retries=3)["historyId"]
+
+
+def get_new_message_ids(gmail_service, start_history_id: str) -> list[str] | None:
+    """Message ids added since start_history_id (deduped — the same
+    message can appear in multiple history records), or None if Gmail
+    reports 404 (checkpoint too old/expired; caller re-baselines instead
+    of treating this as a failure)."""
+    message_ids: set[str] = set()
+    page_token = None
+    try:
+        while True:
+            response = (
+                gmail_service.users()
+                .history()
+                .list(
+                    userId="me",
+                    startHistoryId=start_history_id,
+                    historyTypes=["messageAdded"],
+                    pageToken=page_token,
+                )
+                .execute(num_retries=3)
             )
-            .execute(num_retries=3)
-        )
-        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
-        emails.append(
-            {
-                "id": msg["id"],
-                "from": headers.get("From", ""),
-                "subject": headers.get("Subject", ""),
-                "date": headers.get("Date", ""),
-                "snippet": msg.get("snippet", ""),
-            }
-        )
-    return emails
+            for record in response.get("history", []):
+                for added in record.get("messagesAdded", []):
+                    message_ids.add(added["message"]["id"])
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+    except HttpError as e:
+        if e.resp.status == 404:
+            return None
+        raise
+    return list(message_ids)
+
+
+def get_messages_by_id(gmail_service, message_ids: list[str]) -> list[dict]:
+    return [_get_message_metadata(gmail_service, mid) for mid in message_ids]
 
 
 def build_query(intent_args: dict, unread_only: bool) -> str:

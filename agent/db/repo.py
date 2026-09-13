@@ -128,3 +128,58 @@ def close_pending_item(conn: psycopg.Connection, message_id: str) -> None:
             (message_id,),
         )
     conn.commit()
+
+
+def get_email_checkpoint(conn: psycopg.Connection) -> str | None:
+    """Returns the last-processed Gmail historyId, or None if no checkpoint
+    has been established yet (this phase's first-ever poll)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT last_history_id FROM email_checkpoint WHERE id = 'singleton'")
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def save_email_checkpoint(conn: psycopg.Connection, history_id: str) -> None:
+    """Inserts or advances the singleton email-checkpoint row."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO email_checkpoint (id, last_history_id, updated_at)
+            VALUES ('singleton', %s, now())
+            ON CONFLICT (id) DO UPDATE
+                SET last_history_id = EXCLUDED.last_history_id,
+                    updated_at = now()
+            """,
+            (history_id,),
+        )
+    conn.commit()
+
+
+def is_milestone_notified(conn: psycopg.Connection, item_key: str, milestone_type: str) -> bool:
+    """item_key is the prefixed id (f"assignment:{coursework_id}" /
+    f"announcement:{announcement_id}") so the two id spaces can't collide
+    in the shared coursework_id column."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM notified_milestones WHERE coursework_id = %s AND milestone_type = %s",
+            (item_key, milestone_type),
+        )
+        return cur.fetchone() is not None
+
+
+def record_milestone_notified(
+    conn: psycopg.Connection, course_id: str, item_key: str, milestone_type: str
+) -> None:
+    """Idempotent — ON CONFLICT DO NOTHING, since a batched poll cycle may
+    check the same item's dedup state more than once in edge cases (e.g.
+    a retried job)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO notified_milestones (course_id, coursework_id, milestone_type)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (coursework_id, milestone_type) DO NOTHING
+            """,
+            (course_id, item_key, milestone_type),
+        )
+    conn.commit()

@@ -95,6 +95,29 @@ def list_assignments(
     return assignments
 
 
+def list_announcements(classroom_service, courses: list[dict]) -> list[dict]:
+    announcements: list[dict] = []
+    for course in courses:
+        page_token = None
+        while True:
+            response = (
+                classroom_service.courses()
+                .announcements()
+                .list(
+                    courseId=course["id"],
+                    announcementStates=["PUBLISHED"],
+                    pageToken=page_token,
+                )
+                .execute(num_retries=3)
+            )
+            for a in response.get("announcements", []):
+                announcements.append({"course": course, "announcement": a})
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+    return announcements
+
+
 def format_courses_reply(courses: list[dict]) -> str:
     if not courses:
         return "You're not enrolled in any active courses."

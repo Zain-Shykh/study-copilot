@@ -28,7 +28,8 @@ async def ingest_assignment(
     """
     try:
         courseWork = (
-            classroom_service.courseWork()
+            classroom_service.courses()
+            .courseWork()
             .get(courseId=course_id, id=coursework_id)
             .execute(num_retries=3)
         )

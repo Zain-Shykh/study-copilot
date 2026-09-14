@@ -46,7 +46,8 @@ def _due_datetime(coursework: dict) -> datetime | None:
 
 def _is_missing(classroom_service, course_id: str, coursework_id: str) -> bool:
     response = (
-        classroom_service.courseWork()
+        classroom_service.courses()
+        .courseWork()
         .studentSubmissions()
         .list(courseId=course_id, courseWorkId=coursework_id, userId="me")
         .execute(num_retries=3)
@@ -67,7 +68,8 @@ def list_assignments(
         page_token = None
         while True:
             response = (
-                classroom_service.courseWork()
+                classroom_service.courses()
+                .courseWork()
                 .list(courseId=course["id"], courseStates=["PUBLISHED"], pageToken=page_token)
                 .execute(num_retries=3)
             )

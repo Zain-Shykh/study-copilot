@@ -8,7 +8,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 from google import genai
-from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import ConnectionPool
 
 from agent.config import load_settings
@@ -38,8 +38,8 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         pool = ConnectionPool(settings.database_url, open=True)
-        with PostgresSaver.from_conn_string(settings.database_url) as checkpointer:
-            checkpointer.setup()
+        async with AsyncPostgresSaver.from_conn_string(settings.database_url) as checkpointer:
+            await checkpointer.setup()
 
             app.state.settings = settings
             app.state.pool = pool
@@ -49,7 +49,7 @@ def create_app() -> FastAPI:
             app.state.background_tasks: set[asyncio.Task] = set()
 
             with pool.connection() as conn:
-                interrupted_titles = scan_for_interrupted_assignments(app.state.assignment_graph, conn)
+                interrupted_titles = await scan_for_interrupted_assignments(app.state.assignment_graph, conn)
             for title in interrupted_titles:
                 try:
                     await send_whatsapp_message(

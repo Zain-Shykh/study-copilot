@@ -1,7 +1,7 @@
 """Startup crash-recovery scan: finds assignment threads stuck mid-node, not cleanly paused."""
 
 
-def scan_for_interrupted_assignments(assignment_graph, conn) -> list[str]:
+async def scan_for_interrupted_assignments(assignment_graph, conn) -> list[str]:
     """Returns the titles of assignment threads that were actively
     mid-node (not cleanly paused at an interrupt, not terminal) when the
     process last stopped. Reads distinct assignment: thread_ids from the
@@ -15,7 +15,7 @@ def scan_for_interrupted_assignments(assignment_graph, conn) -> list[str]:
 
     interrupted_titles = []
     for thread_id in thread_ids:
-        snapshot = assignment_graph.get_state({"configurable": {"thread_id": thread_id}})
+        snapshot = await assignment_graph.aget_state({"configurable": {"thread_id": thread_id}})
         if not snapshot.next:
             continue  # terminal — finished, or already ended (reject/decline)
         paused_at_interrupt = any(getattr(t, "interrupts", None) for t in snapshot.tasks)

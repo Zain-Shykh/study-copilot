@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Agent — Privacy Notice</title>
+<style>
+  body { max-width: 680px; margin: 3rem auto; padding: 0 1.5rem; font-family: Georgia, 'Times New Roman', serif; line-height: 1.6; color: #1a2320; background: #f3f6f4; }
+  h1 { font-size: 1.8rem; margin-bottom: 0.2rem; }
+  .meta { font-family: monospace; font-size: 0.8rem; color: #6b7570; margin-bottom: 2rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-top: 1px solid #d7dfd9; padding-top: 1.2rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #d7dfd9; font-size: 0.92rem; }
+  code { background: #e3ece7; padding: 0.1em 0.4em; border-radius: 3px; font-size: 0.85em; }
+  a { color: #26463b; }
+</style>
+</head>
+<body>
+
+<h1>Local Agent — Privacy Notice</h1>
+<p class="meta">Effective 14 September 2026</p>
+
+<p><strong>In plain terms:</strong> Local Agent is a personal WhatsApp assistant built and run by its one owner, for that owner's own Gmail and Google Classroom account. It has no other users, shows no ads, and never sells or shares data with advertisers or data brokers.</p>
+
+<h2>1. Who this covers</h2>
+<p>Local Agent is a single-user personal tool, not a public product. It is operated by its owner for that owner's own accounts only, and is not distributed or made available to any other person.</p>
+
+<h2>2. What data is accessed</h2>
+<p>With the owner's Google account authorization: <code>gmail.readonly</code>, <code>classroom.courses.readonly</code>, <code>classroom.coursework.me.readonly</code>, <code>classroom.announcements.readonly</code>, <code>drive.readonly</code> (assignment attachments).</p>
+<p>Separately, it reads the text of WhatsApp messages sent by the owner to the tool's WhatsApp Business number, via the Meta Cloud API, to respond to them.</p>
+
+<h2>3. How that data is used</h2>
+<ul>
+<li>Answering the owner's own questions about their inbox and coursework, on request</li>
+<li>Sending a batched digest of new mail and new/due Classroom items, twice daily</li>
+<li>Drafting a homework response from an assignment's own materials — shown to the owner for review before anything is finalized</li>
+<li>Sending an email or submitting an assignment only after the owner explicitly approves that specific action</li>
+</ul>
+
+<h2>4. Where data is processed and stored</h2>
+<p>State, session tokens, and checkpoints are stored in a PostgreSQL database on the owner's own machine — not a shared or third-party hosted database. These services process data to carry out the actions above, each under their own standard API terms:</p>
+<table>
+<tr><th>Service</th><th>Data</th><th>Purpose</th></tr>
+<tr><td>Google APIs</td><td>Gmail, Classroom, Drive content</td><td>Fetch the data in §2</td></tr>
+<tr><td>Google Gemini API</td><td>Email/Classroom content</td><td>Generate summaries and digests</td></tr>
+<tr><td>Anthropic Claude</td><td>Assignment materials</td><td>Research and draft responses (owner's own subscription)</td></tr>
+<tr><td>Meta WhatsApp Cloud API</td><td>Message text</td><td>Send/receive WhatsApp messages</td></tr>
+</table>
+
+<h2>5. What is never done with this data</h2>
+<p>Never sold or rented; never used for advertising or analytics products; never shared beyond the processors in §4; never used to train a model beyond what those processors' own API terms already permit.</p>
+
+<h2>6. Retention and revocation</h2>
+<p>Retained only as long as the tool runs, only for the purposes in §3.</p>
+<ul>
+<li>Google access — revoke anytime at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a></li>
+<li>WhatsApp — stop messaging the tool's number</li>
+</ul>
+
+<h2>7. Contact</h2>
+<p>helloaidummy@gmail.com</p>
+
+</body>
+</html>

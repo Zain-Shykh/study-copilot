@@ -14,8 +14,7 @@ from langgraph.types import Command
 from agent import google_auth, llm
 from agent.db import repo
 from agent.graph.nodes import classroom
-from agent.graph.nodes.classroom import classroom_node
-from agent.graph.nodes.gmail import gmail_node
+from agent.graph.nodes.answer_question import answer_question_node
 from agent.graph.nodes.whatsapp_send import send_whatsapp_message
 from agent.graph.state import RouterState
 from agent.llm import classify_intent
@@ -105,10 +104,7 @@ def route_after_classify(state: RouterState) -> str:
         # classify_intent already failed and set a reply — skip straight to sending it.
         return "send_reply"
     return {
-        "list_courses": "classroom_node",
-        "whats_due": "classroom_node",
-        "summarize_emails": "gmail_node",
-        "search_emails": "gmail_node",
+        "answer_question": "answer_question_node",
         "work_on_assignment": "resolve_assignment",
         "respond_to_pending": "resolve_pending_item",
         "unrecognized": "fallback_node",
@@ -157,7 +153,7 @@ def resolve_assignment_node(state: RouterState, config: RunnableConfig) -> dict:
 
     try:
         courses = classroom.list_courses(classroom_service)
-        assignments = classroom.list_assignments(
+        assignments, _failed_courses = classroom.list_assignments(
             classroom_service, courses, scope="all", window_hours=0
         )
     except HttpError as e:
@@ -556,8 +552,7 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
     g.add_node("handle_disambiguation", handle_disambiguation_node)
     g.add_node("handle_pending_item_reply", handle_pending_item_reply)
     g.add_node("handle_pending_item_disambiguation", handle_pending_item_disambiguation_node)
-    g.add_node("classroom_node", classroom_node)
-    g.add_node("gmail_node", gmail_node)
+    g.add_node("answer_question_node", answer_question_node)
     g.add_node("fallback_node", fallback_node)
     g.add_node("send_reply", send_reply_node)
 
@@ -577,8 +572,7 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
         "classify_intent",
         route_after_classify,
         {
-            "classroom_node": "classroom_node",
-            "gmail_node": "gmail_node",
+            "answer_question_node": "answer_question_node",
             "fallback_node": "fallback_node",
             "resolve_assignment": "resolve_assignment",
             "resolve_pending_item": "resolve_pending_item",
@@ -586,8 +580,7 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
         },
     )
     for node_name in (
-        "classroom_node",
-        "gmail_node",
+        "answer_question_node",
         "fallback_node",
         "resolve_assignment",
         "resolve_pending_item",

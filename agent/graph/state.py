@@ -8,7 +8,7 @@ class RouterState(TypedDict, total=False):
     whatsapp_message_id: str
     sender: str
     reply_to_message_id: str | None  # Meta's context.id for this inbound message, if any
-    intent: str  # one of: list_courses | whats_due | summarize_emails | search_emails | work_on_assignment | respond_to_pending | unrecognized
+    intent: str  # one of: answer_question | work_on_assignment | respond_to_pending | unrecognized
     intent_args: dict[str, Any]
     reply_text: str | None  # reset to None at the start of every turn by route_entry_node
     pending_question: dict | None  # see router_graph.py; persists via checkpointer

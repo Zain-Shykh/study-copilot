@@ -1,6 +1,8 @@
-"""Gemini client wrapper: intent classification and email summarization."""
+"""Gemini client wrapper: intent classification, tool-calling read answers,
+and email summarization."""
 
 import time
+from typing import Callable
 
 from google import genai
 from google.genai import types
@@ -9,29 +11,18 @@ _MAX_ATTEMPTS = 3
 _BACKOFF_SECONDS = 1.0
 
 CLASSIFY_SYSTEM_PROMPT = """\
-You classify one inbound WhatsApp message into exactly one supported read \
-command by calling route_message. Supported commands:
+You classify one inbound WhatsApp message into exactly one category by
+calling route_message. Categories:
 
-- list_courses: the user wants to see their enrolled Classroom courses.
-- whats_due: the user is asking about assignments (due soon, all, overdue,
-  or missing). If they don't specify a window, default due_window_hours to
-  48 and due_scope to "due_soon". If they say "everything" or "all
-  assignments", use due_scope "all". If they ask what's overdue, use
-  "overdue". If they ask what they're missing/haven't turned in, use
-  "missing".
-- summarize_emails: the user wants a summary/digest of their emails. If they
-  don't specify a count or filter, default email_count to 10 and assume
-  unread-only.
-- search_emails: the user wants to find/list specific emails (e.g. from a
-  sender, with a subject, in a label/folder) without asking for a summary.
-  Extract whichever of email_sender/email_subject/email_label were
-  mentioned; default email_count to 10 if not specified.
-- work_on_assignment: the user wants to start drafting/researching a specific
-  assignment (e.g. "work on the bio essay", "start the AI assignment",
-  "draft the technical writing paper"). Extract the free-text name/description
-  they used into assignment_reference. This is the ONLY intent that leads to
-  eventually writing/drafting anything — still just resolves which assignment
-  is meant at this stage, does not draft anything itself.
+- answer_question: the user is asking about their Classroom courses,
+  assignments, announcements, or email in any form — listing, counting,
+  a specific item's details, a summary, a search. Anything read-only.
+- work_on_assignment: the user wants to start drafting/researching a
+  specific assignment (e.g. "work on the bio essay", "start the AI
+  assignment"). Extract the free-text name/description they used into
+  assignment_reference. This is the ONLY intent that leads to eventually
+  writing/drafting anything — still just resolves which assignment is
+  meant at this stage, does not draft anything itself.
 - respond_to_pending: the user is making a decision about a draft or
   pending item they were previously shown — approving it, asking for
   changes, rejecting it, or answering a submit yes/no question — whether
@@ -39,57 +30,28 @@ command by calling route_message. Supported commands:
   "make it shorter", "no", "reject it", "approve the bio essay". If they
   name a specific course/assignment, extract it into
   pending_item_reference; leave it unset if they didn't name one.
-- unrecognized: anything that isn't clearly one of the above commands.
-  This includes any request to send, submit, reply to, or turn in
-  something that isn't a reply to a pending item — those are not
-  supported yet and must be classified as unrecognized, never routed to a
-  read command.
+- unrecognized: anything that isn't clearly one of the above. This
+  includes any request to send, submit, reply to, or turn in something
+  that isn't a reply to a pending item — those are not supported yet and
+  must be classified as unrecognized, never routed to answer_question.
 
 Always call route_message exactly once with your best classification.
 """
 
 ROUTE_MESSAGE_DECLARATION = types.FunctionDeclaration(
     name="route_message",
-    description="Classify an inbound WhatsApp message into one supported read command.",
+    description="Classify an inbound WhatsApp message.",
     parameters=types.Schema(
         type="OBJECT",
         properties={
             "intent": types.Schema(
                 type="STRING",
                 enum=[
-                    "list_courses",
-                    "whats_due",
-                    "summarize_emails",
-                    "search_emails",
+                    "answer_question",
                     "work_on_assignment",
                     "respond_to_pending",
                     "unrecognized",
                 ],
-            ),
-            "due_window_hours": types.Schema(
-                type="INTEGER",
-                description="only for whats_due; defaults to 48 if not mentioned",
-            ),
-            "due_scope": types.Schema(
-                type="STRING",
-                enum=["due_soon", "all", "overdue", "missing"],
-                description="only for whats_due",
-            ),
-            "email_count": types.Schema(
-                type="INTEGER",
-                description="only for summarize_emails/search_emails; defaults to 10",
-            ),
-            "email_sender": types.Schema(
-                type="STRING",
-                description="only for search_emails, if a sender/from was named",
-            ),
-            "email_subject": types.Schema(
-                type="STRING",
-                description="only for search_emails, if subject keywords were named",
-            ),
-            "email_label": types.Schema(
-                type="STRING",
-                description="only for search_emails, if a label/folder was named",
             ),
             "assignment_reference": types.Schema(
                 type="STRING",
@@ -103,6 +65,57 @@ ROUTE_MESSAGE_DECLARATION = types.FunctionDeclaration(
         required=["intent"],
     ),
 )
+
+ANSWER_SYSTEM_PROMPT = """\
+You answer one inbound WhatsApp message about the user's Gmail and Google
+Classroom by calling the available tools to fetch real data, then writing
+a short, direct reply. Rules:
+- Always call at least one tool before answering — never guess or use
+  outside knowledge about the user's courses, assignments, or email.
+- Call as many tools as you need to fully answer, including calling the
+  same tool again with different arguments.
+- If a tool result notes it couldn't check something (e.g. a course
+  returned an error), mention that limitation briefly in your answer
+  rather than silently ignoring it or treating the data as complete.
+- If nothing in the tool results answers the question, say so plainly —
+  do not fabricate an answer.
+- Keep the reply concise and in plain text formatted for WhatsApp — short
+  lines, no markdown headers, no asterisk bullets (use "-").
+"""
+
+
+def answer_question(
+    client: genai.Client,
+    model: str,
+    text: str,
+    tools: list[Callable],
+    max_remote_calls: int = 4,
+) -> str:
+    """Runs Gemini's automatic function-calling loop (SDK-managed — passing
+    plain Python callables as `tools` makes generate_content execute them
+    itself and loop until a final text answer, bounded by
+    automatic_function_calling.maximum_remote_calls) to answer a free-text
+    question. Raises after 3 failed attempts (network/5xx/429, via
+    _with_retry) or RuntimeError if the model exhausts max_remote_calls
+    without producing a final text answer."""
+
+    def call():
+        return client.models.generate_content(
+            model=model,
+            contents=text,
+            config=types.GenerateContentConfig(
+                system_instruction=ANSWER_SYSTEM_PROMPT,
+                tools=tools,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    maximum_remote_calls=max_remote_calls,
+                ),
+            ),
+        )
+
+    response = _with_retry(call)
+    if not response.text:
+        raise RuntimeError("answer_question: model produced no final text")
+    return response.text
 
 SUMMARIZE_SYSTEM_PROMPT = """\
 You write concise, formal email digests for a personal assistant app. Given \

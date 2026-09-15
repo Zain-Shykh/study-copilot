@@ -126,7 +126,8 @@ async def poll_classroom_job(
                 ("due_soon", "due_soon", _DUE_SOON_WINDOW_HOURS),
                 ("overdue", "missing", 0),
             ):
-                for item in list_assignments(classroom_service, courses, scope, window):
+                assignments, _failed_courses = list_assignments(classroom_service, courses, scope, window)
+                for item in assignments:
                     key = f"assignment:{item['courseWork']['id']}"
                     if not repo.is_milestone_notified(conn, key, milestone_type):
                         repo.record_milestone_notified(conn, item["course"]["id"], key, milestone_type)

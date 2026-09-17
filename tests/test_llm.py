@@ -1,6 +1,7 @@
 """Unit tests for agent/llm.py: classify_intent (narrowed to 4 intents,
 per specs/tool-calling-read-answers.md) and the new answer_question."""
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -123,6 +124,26 @@ class TestAnswerQuestion:
 
         _, kwargs = client.models.generate_content.call_args
         assert kwargs["config"].automatic_function_calling.maximum_remote_calls == 4
+
+    def test_includes_actual_todays_date_in_system_instruction(self, monkeypatch):
+        """Regression test: the model used to guess "today" itself and got
+        it wrong differently on every call (e.g. computing a different
+        "next 2 weeks" window each time) — the real date must be injected
+        so relative-time questions are answered consistently and correctly."""
+
+        class _FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 9, 17, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(llm, "datetime", _FixedDatetime)
+        client = MagicMock()
+        client.models.generate_content.return_value = _response_with_text("ok")
+
+        llm.answer_question(client, "gemini-x", "what's due in the next 2 weeks?", tools=[])
+
+        _, kwargs = client.models.generate_content.call_args
+        assert "2026-09-17" in kwargs["config"].system_instruction
 
     def test_raises_runtime_error_on_empty_text(self):
         client = MagicMock()

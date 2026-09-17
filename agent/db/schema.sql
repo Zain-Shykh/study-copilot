@@ -35,3 +35,12 @@ CREATE TABLE IF NOT EXISTS oauth_credentials (
     credentials_json  TEXT NOT NULL,           -- google.oauth2.credentials.Credentials.to_json()
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Dedups inbound WhatsApp webhook deliveries: Meta redelivers a webhook
+-- event if the endpoint doesn't ack fast enough, which would otherwise
+-- re-run a slow tool-calling turn and send a second, independently-worded
+-- reply for the same message.
+CREATE TABLE IF NOT EXISTS processed_messages (
+    whatsapp_message_id TEXT PRIMARY KEY,
+    processed_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);

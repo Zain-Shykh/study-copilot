@@ -9,12 +9,18 @@ _MISSING_STATES = {"TURNED_IN", "RETURNED"}
 
 
 def list_courses(classroom_service) -> list[dict]:
+    """Only courses where the user is enrolled as a student — courses
+    where they're a teacher/TA are excluded (studentId="me"), since every
+    caller (assignment/announcement lookups, proactive polling, "work on
+    X" matching) only makes sense for courses you take, not ones you
+    teach. This also sidesteps permission errors on teacher-role courses
+    that require a separate OAuth scope to read student data for."""
     courses: list[dict] = []
     page_token = None
     while True:
         response = (
             classroom_service.courses()
-            .list(courseStates=["ACTIVE"], pageToken=page_token)
+            .list(courseStates=["ACTIVE"], studentId="me", pageToken=page_token)
             .execute(num_retries=3)
         )
         courses.extend(response.get("courses", []))

@@ -130,6 +130,31 @@ def close_pending_item(conn: psycopg.Connection, message_id: str) -> None:
     conn.commit()
 
 
+def mark_message_processed_if_new(conn: psycopg.Connection, whatsapp_message_id: str) -> bool:
+    """Atomically records this inbound WhatsApp message id as processed.
+
+    Returns True the first time a given id is seen (caller should process
+    it), False if it was already recorded — a duplicate webhook delivery
+    (Meta retries when a webhook doesn't ack fast enough) that the caller
+    should treat as a no-op rather than re-running the whole turn. The
+    INSERT-with-RETURNING is atomic, so two concurrent deliveries of the
+    same id can't both be told "you're new."
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO processed_messages (whatsapp_message_id)
+            VALUES (%s)
+            ON CONFLICT DO NOTHING
+            RETURNING whatsapp_message_id
+            """,
+            (whatsapp_message_id,),
+        )
+        is_new = cur.fetchone() is not None
+    conn.commit()
+    return is_new
+
+
 def get_email_checkpoint(conn: psycopg.Connection) -> str | None:
     """Returns the last-processed Gmail historyId, or None if no checkpoint
     has been established yet (this phase's first-ever poll)."""

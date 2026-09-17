@@ -28,9 +28,10 @@ def answer_question_node(state: RouterState, config: RunnableConfig) -> dict:
 
     def get_courses() -> list[dict]:
         """Returns every active Google Classroom course the user is
-        enrolled in or teaches, as a list of {"name": str}. Call this
-        first if you need to know what courses exist or need a course
-        name to pass to get_announcements."""
+        enrolled in as a student (teacher/TA-role courses are excluded),
+        as a list of {"name": str}. Call this first if you need to know
+        what courses exist or need a course name to pass to
+        get_announcements."""
         try:
             courses = classroom.list_courses(classroom_service)
         except HttpError as e:

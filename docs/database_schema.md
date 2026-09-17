@@ -95,13 +95,50 @@ starting fresh.
 
 ---
 
+## `oauth_credentials`
+
+Stores the user's Google OAuth token so the process doesn't need a fresh
+interactive login on every restart.
+
+| Column              | Type          | Notes                                                     |
+|----------------------|---------------|------------------------------------------------------------|
+| `provider`             | `TEXT`         | **Primary key.** Always `'google'` in v1 (single provider). |
+| `credentials_json`      | `TEXT`         | `google.oauth2.credentials.Credentials.to_json()` output.   |
+| `updated_at`             | `TIMESTAMPTZ`  | Defaults to `now()`.                                        |
+
+**Written**: after the initial OAuth flow, and again whenever the stored token
+is refreshed.
+**Read**: on startup and whenever a Google API client is built
+(`agent/google_auth.py`).
+
+---
+
+## `processed_messages`
+
+Dedups inbound WhatsApp webhook deliveries. Meta redelivers a webhook event if
+the endpoint doesn't ack fast enough, which would otherwise re-run a slow
+tool-calling turn and send a second, independently-worded reply for the same
+message.
+
+| Column                 | Type          | Notes                                     |
+|-------------------------|---------------|---------------------------------------------|
+| `whatsapp_message_id`     | `TEXT`         | **Primary key.** The inbound message's ID.  |
+| `processed_at`             | `TIMESTAMPTZ`  | Defaults to `now()`.                        |
+
+**Written**: immediately on receiving a webhook delivery, via an atomic
+`INSERT ... ON CONFLICT DO NOTHING RETURNING` — before any processing starts.
+**Read**: implicitly by the same insert; a `False` return means this ID was
+already seen and the delivery is a no-op.
+
+---
+
 ## Notes
 
-- All four tables use `TEXT` for IDs rather than typed foreign keys — there's no
+- All six tables use `TEXT` for IDs rather than typed foreign keys — there's no
   formal relationship to LangGraph's own checkpoint tables (different package,
   different schema), so IDs are just matched by convention (e.g.
   `claude_sessions.assignment_thread_id` is the same string as the LangGraph
   `thread_id` used for that assignment).
 - No migrations tooling yet — `agent/db/schema.sql` is applied directly
   (`CREATE TABLE IF NOT EXISTS`), matched to the current scale (single user,
-  four small tables).
+  six small tables).

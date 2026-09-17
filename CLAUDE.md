@@ -143,12 +143,14 @@ what succeeded).
 ### Database
 
 One local Postgres instance holds LangGraph's own checkpoint tables
-(`langgraph-checkpoint-postgres`) plus four app-specific tables defined in
+(`langgraph-checkpoint-postgres`) plus six app-specific tables defined in
 `agent/db/schema.sql`: `pending_items` (reply routing), `email_checkpoint`
 (Gmail digest watermark — see below), `notified_milestones` (proactive
 notification dedup), `claude_sessions` (assignment thread → Claude Code session
-ID, for `--resume`). No ORM — plain `psycopg` via `agent/db/repo.py`, given the
-small number of simple tables.
+ID, for `--resume`), `oauth_credentials` (stored Google OAuth token), and
+`processed_messages` (webhook delivery dedup — see "Error handling" below).
+No ORM — plain `psycopg` via `agent/db/repo.py`, given the small number of
+simple tables.
 
 ### Gmail digest checkpoint
 

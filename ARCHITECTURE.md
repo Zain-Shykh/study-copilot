@@ -35,7 +35,7 @@ flowchart TB
         ROUTER -. "asyncio.create_task<br/>(fire-and-forget)" .-> ASSIGN
     end
 
-    PG[("PostgreSQL<br/>— LangGraph checkpoints (per thread_id)<br/>— pending_items (reply routing)<br/>— oauth_credentials<br/>— email_checkpoint<br/>— notified_milestones<br/>— claude_sessions")]
+    PG[("PostgreSQL<br/>— LangGraph checkpoints (per thread_id)<br/>— pending_items (reply routing)<br/>— oauth_credentials<br/>— email_checkpoint<br/>— notified_milestones<br/>— claude_sessions<br/>— processed_messages (webhook dedup)")]
 
     ROUTER <--> PG
     ASSIGN <--> PG

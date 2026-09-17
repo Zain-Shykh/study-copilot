@@ -2,6 +2,7 @@
 and email summarization."""
 
 import time
+from datetime import datetime, timezone
 from typing import Callable
 
 from google import genai
@@ -79,6 +80,9 @@ a short, direct reply. Rules:
   rather than silently ignoring it or treating the data as complete.
 - If nothing in the tool results answers the question, say so plainly —
   do not fabricate an answer.
+- For any relative-time question ("due soon", "next 2 weeks", "overdue",
+  "today"), compute the window from the actual date given to you above —
+  never guess or assume what today's date is.
 - Keep the reply concise and in plain text formatted for WhatsApp — short
   lines, no markdown headers, no asterisk bullets (use "-").
 """
@@ -98,13 +102,15 @@ def answer_question(
     question. Raises after 3 failed attempts (network/5xx/429, via
     _with_retry) or RuntimeError if the model exhausts max_remote_calls
     without producing a final text answer."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    system_instruction = f"Today's date is {today} (UTC).\n\n{ANSWER_SYSTEM_PROMPT}"
 
     def call():
         return client.models.generate_content(
             model=model,
             contents=text,
             config=types.GenerateContentConfig(
-                system_instruction=ANSWER_SYSTEM_PROMPT,
+                system_instruction=system_instruction,
                 tools=tools,
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
                     maximum_remote_calls=max_remote_calls,

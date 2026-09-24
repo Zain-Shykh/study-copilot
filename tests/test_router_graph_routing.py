@@ -1,5 +1,6 @@
-"""Unit tests for the pure routing function route_after_classify, updated
-per specs/tool-calling-read-answers.md to the narrowed 4-intent set."""
+"""Unit tests for the pure routing function route_after_classify, covering
+the intent set from specs/tool-calling-read-answers.md and
+specs/email-drafting.md."""
 
 from agent.graph.router_graph import route_after_classify
 
@@ -10,6 +11,10 @@ def test_answer_question_routes_to_answer_question_node():
 
 def test_work_on_assignment_routes_to_resolve_assignment():
     assert route_after_classify({"intent": "work_on_assignment"}) == "resolve_assignment"
+
+
+def test_draft_email_routes_to_resolve_email():
+    assert route_after_classify({"intent": "draft_email"}) == "resolve_email"
 
 
 def test_respond_to_pending_routes_to_resolve_pending_item():

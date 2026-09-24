@@ -1,5 +1,6 @@
-"""Unit tests for agent/llm.py: classify_intent (narrowed to 4 intents,
-per specs/tool-calling-read-answers.md) and the new answer_question."""
+"""Unit tests for agent/llm.py: classify_intent (per
+specs/tool-calling-read-answers.md and specs/email-drafting.md) and the
+answer_question/draft_email generation functions."""
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -53,6 +54,18 @@ class TestClassifyIntent:
 
         assert intent == "respond_to_pending"
         assert args == {"pending_item_reference": "algorithms"}
+
+    def test_draft_email_extracts_reference_and_topic(self):
+        client = MagicMock()
+        client.models.generate_content.return_value = _response_with_function_call(
+            "route_message",
+            {"intent": "draft_email", "email_reference": "the registrar", "email_topic": "ask about my transcript"},
+        )
+
+        intent, args = llm.classify_intent(client, "gemini-x", "reply to the registrar about my transcript")
+
+        assert intent == "draft_email"
+        assert args == {"email_reference": "the registrar", "email_topic": "ask about my transcript"}
 
     def test_unrecognized(self):
         client = MagicMock()
@@ -171,3 +184,68 @@ class TestAnswerQuestion:
 
         assert result == "answer after retry"
         assert client.models.generate_content.call_count == 2
+
+
+class TestDraftEmail:
+    def test_returns_subject_and_body(self):
+        client = MagicMock()
+        client.models.generate_content.return_value = _response_with_function_call(
+            "record_draft", {"subject": "Transcript request", "body": "Could you let me know when it'll be ready?"}
+        )
+
+        subject, body = llm.draft_email(client, "gemini-x", topic="ask when my transcript will be ready")
+
+        assert subject == "Transcript request"
+        assert body == "Could you let me know when it'll be ready?"
+
+    def test_includes_original_email_context_for_a_reply(self):
+        client = MagicMock()
+        client.models.generate_content.return_value = _response_with_function_call(
+            "record_draft", {"subject": "Re: Transcript", "body": "..."}
+        )
+
+        llm.draft_email(
+            client, "gemini-x", topic="ask when it'll be ready",
+            original_subject="Transcript", original_body="Your transcript is being processed.",
+        )
+
+        _, kwargs = client.models.generate_content.call_args
+        assert "Your transcript is being processed." in kwargs["contents"]
+        assert "Transcript" in kwargs["contents"]
+
+    def test_includes_prior_draft_and_feedback_on_a_revision(self):
+        client = MagicMock()
+        client.models.generate_content.return_value = _response_with_function_call(
+            "record_draft", {"subject": "S", "body": "Shorter body."}
+        )
+
+        llm.draft_email(
+            client, "gemini-x", topic="ask for an extension",
+            prior_subject="S", prior_body="A much longer previous draft.",
+            feedback="make it shorter",
+        )
+
+        _, kwargs = client.models.generate_content.call_args
+        assert "A much longer previous draft." in kwargs["contents"]
+        assert "make it shorter" in kwargs["contents"]
+
+    def test_forces_record_draft_function_call(self):
+        client = MagicMock()
+        client.models.generate_content.return_value = _response_with_function_call(
+            "record_draft", {"subject": "S", "body": "B"}
+        )
+
+        llm.draft_email(client, "gemini-x", topic="hello")
+
+        _, kwargs = client.models.generate_content.call_args
+        assert kwargs["config"].tool_config.function_calling_config.allowed_function_names == ["record_draft"]
+
+    @patch("agent.llm.time.sleep")
+    def test_raises_after_max_attempts(self, mock_sleep):
+        client = MagicMock()
+        client.models.generate_content.side_effect = RuntimeError("still down")
+
+        with pytest.raises(RuntimeError, match="still down"):
+            llm.draft_email(client, "gemini-x", topic="hi")
+
+        assert client.models.generate_content.call_count == 3

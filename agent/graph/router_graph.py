@@ -2,7 +2,9 @@
 
 import asyncio
 import difflib
+import email.utils
 import logging
+import uuid
 
 import httpx
 from googleapiclient.errors import HttpError
@@ -13,7 +15,7 @@ from langgraph.types import Command
 
 from agent import google_auth, llm
 from agent.db import repo
-from agent.graph.nodes import classroom
+from agent.graph.nodes import classroom, gmail
 from agent.graph.nodes.answer_question import answer_question_node
 from agent.graph.nodes.whatsapp_send import send_whatsapp_message
 from agent.graph.state import RouterState
@@ -78,6 +80,8 @@ def route_after_entry(state: RouterState) -> str:
         return {
             "disambiguate_assignment": "handle_disambiguation",
             "confirm_start_assignment": "handle_confirmation",
+            "disambiguate_email": "handle_email_disambiguation",
+            "confirm_draft_email": "handle_email_confirmation",
             "disambiguate_pending_item": "handle_pending_item_disambiguation",
         }[pending_question["kind"]]
     if state.get("matched_pending_item") is not None:
@@ -106,6 +110,7 @@ def route_after_classify(state: RouterState) -> str:
     return {
         "answer_question": "answer_question_node",
         "work_on_assignment": "resolve_assignment",
+        "draft_email": "resolve_email",
         "respond_to_pending": "resolve_pending_item",
         "unrecognized": "fallback_node",
     }[state["intent"]]
@@ -190,6 +195,108 @@ def resolve_assignment_node(state: RouterState, config: RunnableConfig) -> dict:
             "kind": "disambiguate_assignment",
             "message_id": None,
             "candidates": shortlisted,
+        },
+    }
+
+
+def _extract_email_address(from_header: str) -> str:
+    return email.utils.parseaddr(from_header)[1]
+
+
+def _resolved_from_match(match: dict, topic: str) -> dict:
+    return {
+        "mode": "reply",
+        "recipient_email": _extract_email_address(match["from"]),
+        "recipient_display": match["from"],
+        "original_subject": match["subject"],
+        "gmail_message_id": match["id"],
+        "gmail_thread_id": match["thread_id"],
+        "gmail_message_id_header": match["message_id_header"],
+        "topic": topic,
+    }
+
+
+def _confirm_email_question_text(resolved: dict) -> str:
+    if resolved["mode"] == "reply":
+        suffix = f" — {resolved['topic']}" if resolved["topic"] else ""
+        return (
+            f'Should I draft a reply to "{resolved["original_subject"]}" from '
+            f'{resolved["recipient_display"]}{suffix}?'
+        )
+    return f'Should I draft a new email to {resolved["recipient_email"]} — {resolved["topic"]}?'
+
+
+def _confirm_email_reply(resolved: dict) -> dict:
+    return {
+        "reply_text": _confirm_email_question_text(resolved),
+        "pending_question": {"kind": "confirm_draft_email", "message_id": None, "resolved": resolved},
+    }
+
+
+async def resolve_email_node(state: RouterState, config: RunnableConfig) -> dict:
+    """Resolves the draft_email intent's free-text target into either a new
+    recipient address or a specific email to reply to, then asks for
+    confirmation before drafting anything. Unlike resolve_assignment_node,
+    matching against existing emails uses Gmail's own search rather than
+    local fuzzy scoring — see spec §6.1."""
+    pool = config["configurable"]["pool"]
+    with pool.connection() as conn:
+        clients = google_auth.load_google_clients(conn)
+    if isinstance(clients, str):
+        return {"reply_text": clients}
+    gmail_service, _, _ = clients
+
+    target_text = state.get("intent_args", {}).get("email_reference", "").strip()
+    topic = state.get("intent_args", {}).get("email_topic", "")
+
+    if not target_text:
+        return {
+            "reply_text": "Who would you like to email, or which email are you replying to?",
+            "pending_question": None,
+        }
+
+    if "@" in target_text:
+        if not topic:
+            return {
+                "reply_text": f"What should the email to {target_text} say?",
+                "pending_question": None,
+            }
+        resolved = {
+            "mode": "new",
+            "recipient_email": target_text,
+            "recipient_display": target_text,
+            "original_subject": None,
+            "gmail_message_id": None,
+            "gmail_thread_id": None,
+            "gmail_message_id_header": None,
+            "topic": topic,
+        }
+        return _confirm_email_reply(resolved)
+
+    try:
+        matches = gmail.list_messages(gmail_service, target_text, 5)
+    except HttpError as e:
+        return {"reply_text": f"Couldn't search Gmail right now: {e}"}
+
+    if not matches:
+        return {
+            "reply_text": (
+                f'I couldn\'t find an email matching "{target_text}" — if you want to '
+                "email someone new, give me their email address directly."
+            ),
+            "pending_question": None,
+        }
+    if len(matches) == 1:
+        return _confirm_email_reply(_resolved_from_match(matches[0], topic))
+
+    lines = [f'{i + 1}. From {m["from"]} — "{m["subject"]}" ({m["date"]})' for i, m in enumerate(matches)]
+    return {
+        "reply_text": "Which email did you mean?\n" + "\n".join(lines),
+        "pending_question": {
+            "kind": "disambiguate_email",
+            "message_id": None,
+            "candidates": matches,
+            "topic": topic,
         },
     }
 
@@ -302,10 +409,106 @@ async def resume_assignment_thread(
             logger.exception("Failed to send failure notice for thread %s", thread_id)
 
 
+async def run_email_flow(
+    email_graph,
+    resolved: dict,
+    sender: str,
+    whatsapp_access_token: str,
+    whatsapp_phone_number_id: str,
+    pool,
+    genai_client,
+    gemini_model: str,
+) -> None:
+    """Runs draft -> relay as a single sequential graph invocation, same
+    shape as run_assignment_flow. Unlike assignments, email drafting needs
+    Gemini from the very first invocation (there's no separate "ingest"
+    step), so genai_client/gemini_model are passed here too, not only on
+    resume. See spec §6.3."""
+    thread_id = f"email:{uuid.uuid4()}"
+    try:
+        await email_graph.ainvoke(
+            {
+                "mode": resolved["mode"],
+                "recipient_email": resolved["recipient_email"],
+                "recipient_display": resolved["recipient_display"],
+                "original_subject": resolved["original_subject"],
+                "gmail_message_id": resolved["gmail_message_id"],
+                "gmail_thread_id": resolved["gmail_thread_id"],
+                "gmail_message_id_header": resolved["gmail_message_id_header"],
+                "topic": resolved["topic"],
+                "sender": sender,
+            },
+            config={
+                "configurable": {
+                    "thread_id": thread_id,
+                    "pool": pool,
+                    "whatsapp_access_token": whatsapp_access_token,
+                    "whatsapp_phone_number_id": whatsapp_phone_number_id,
+                    "genai_client": genai_client,
+                    "gemini_model": gemini_model,
+                }
+            },
+        )
+    except Exception:
+        logger.exception("Unhandled error running email flow for %s", resolved["recipient_display"])
+        try:
+            await send_whatsapp_message(
+                whatsapp_access_token,
+                whatsapp_phone_number_id,
+                sender,
+                "Something went wrong while drafting that email — please try again.",
+            )
+        except Exception:
+            logger.exception("Failed to send failure notice for email to %s", resolved["recipient_display"])
+
+
+async def resume_email_thread(
+    email_graph,
+    thread_id: str,
+    pending_item_message_id: str,
+    reply_text: str,
+    sender: str,
+    whatsapp_access_token: str,
+    whatsapp_phone_number_id: str,
+    pool,
+    genai_client,
+    gemini_model: str,
+) -> None:
+    """Same shape and same Decision #3 rationale as resume_assignment_thread
+    — no ack sent here; the graph's own parse_review_node is the sole
+    source of any outbound message for a modeled outcome."""
+    try:
+        await email_graph.ainvoke(
+            Command(resume=reply_text),
+            config={
+                "configurable": {
+                    "thread_id": thread_id,
+                    "pool": pool,
+                    "whatsapp_access_token": whatsapp_access_token,
+                    "whatsapp_phone_number_id": whatsapp_phone_number_id,
+                    "genai_client": genai_client,
+                    "gemini_model": gemini_model,
+                    "_pending_item_message_id": pending_item_message_id,
+                }
+            },
+        )
+    except Exception:
+        logger.exception("Unhandled error resuming email thread %s", thread_id)
+        try:
+            await send_whatsapp_message(
+                whatsapp_access_token,
+                whatsapp_phone_number_id,
+                sender,
+                "Something went wrong processing that reply — please try again.",
+            )
+        except Exception:
+            logger.exception("Failed to send failure notice for thread %s", thread_id)
+
+
 def _dispatch_pending_resume(item: dict, reply_text: str, state: RouterState, config: RunnableConfig) -> None:
     configurable = config["configurable"]
-    task = asyncio.create_task(
-        resume_assignment_thread(
+    if item["item_type"] == "assignment":
+        coro = resume_assignment_thread(
             configurable["assignment_graph"],
             item["thread_id"],
             item["message_id"],
@@ -317,7 +520,20 @@ def _dispatch_pending_resume(item: dict, reply_text: str, state: RouterState, co
             configurable["genai_client"],
             configurable["gemini_model"],
         )
-    )
+    else:  # "email"
+        coro = resume_email_thread(
+            configurable["email_graph"],
+            item["thread_id"],
+            item["message_id"],
+            reply_text,
+            state["sender"],
+            configurable["whatsapp_access_token"],
+            configurable["whatsapp_phone_number_id"],
+            configurable["pool"],
+            configurable["genai_client"],
+            configurable["gemini_model"],
+        )
+    task = asyncio.create_task(coro)
     background_tasks = configurable["background_tasks"]
     background_tasks.add(task)
     task.add_done_callback(lambda t: (background_tasks.discard(t), _log_if_failed(t)))
@@ -345,7 +561,7 @@ async def resolve_pending_item_node(state: RouterState, config: RunnableConfig) 
     reference_text = state.get("intent_args", {}).get("pending_item_reference", "")
 
     with pool.connection() as conn:
-        items = repo.list_pending_items(conn, "assignment")
+        items = repo.list_pending_items(conn)
 
     if not items:
         return {"reply_text": "There's nothing pending right now."}
@@ -452,6 +668,47 @@ async def handle_confirmation_node(state: RouterState, config: RunnableConfig) -
     return {"reply_text": reply_text, "pending_question": None}
 
 
+async def handle_email_confirmation_node(state: RouterState, config: RunnableConfig) -> dict:
+    """pending_question["kind"] == "confirm_draft_email"."""
+    configurable = config["configurable"]
+    pending_question = state["pending_question"]
+    resolved = pending_question["resolved"]
+    question = _confirm_email_question_text(resolved)
+
+    try:
+        answer = llm.parse_confirmation_reply(
+            configurable["genai_client"], configurable["gemini_model"], question, state["inbound_text"]
+        )
+    except Exception:
+        logger.exception("parse_confirmation_reply failed after retries")
+        return {
+            "reply_text": "Couldn't process that reply right now — please try again.",
+            "pending_question": None,
+        }
+
+    if answer == "confirm":
+        task = asyncio.create_task(
+            run_email_flow(
+                configurable["email_graph"],
+                resolved,
+                state["sender"],
+                configurable["whatsapp_access_token"],
+                configurable["whatsapp_phone_number_id"],
+                configurable["pool"],
+                configurable["genai_client"],
+                configurable["gemini_model"],
+            )
+        )
+        background_tasks = configurable["background_tasks"]
+        background_tasks.add(task)
+        task.add_done_callback(lambda t: (background_tasks.discard(t), _log_if_failed(t)))
+        reply_text = "Drafting that email — I'll send it over when it's ready."
+    else:
+        reply_text = "Okay, not drafting that."
+
+    return {"reply_text": reply_text, "pending_question": None}
+
+
 def handle_disambiguation_node(state: RouterState, config: RunnableConfig) -> dict:
     """pending_question["kind"] == "disambiguate_assignment"."""
     configurable = config["configurable"]
@@ -480,6 +737,34 @@ def handle_disambiguation_node(state: RouterState, config: RunnableConfig) -> di
         }
 
     return _confirm_reply(candidates[choice - 1])
+
+
+def handle_email_disambiguation_node(state: RouterState, config: RunnableConfig) -> dict:
+    """pending_question["kind"] == "disambiguate_email"."""
+    configurable = config["configurable"]
+    pending_question = state["pending_question"]
+    candidates = pending_question["candidates"]
+    topic = pending_question["topic"]
+    lines = [f'{i + 1}. From {c["from"]} — "{c["subject"]}" ({c["date"]})' for i, c in enumerate(candidates)]
+
+    try:
+        choice = llm.resolve_disambiguation(
+            configurable["genai_client"], configurable["gemini_model"], lines, state["inbound_text"]
+        )
+    except Exception:
+        logger.exception("resolve_disambiguation failed after retries")
+        return {
+            "reply_text": "Couldn't process that reply right now — please try again.",
+            "pending_question": None,
+        }
+
+    if choice < 1 or choice > len(candidates):
+        return {
+            "reply_text": "Sorry, I couldn't tell which one you meant — try naming it differently.",
+            "pending_question": None,
+        }
+
+    return _confirm_email_reply(_resolved_from_match(candidates[choice - 1], topic))
 
 
 async def handle_pending_item_disambiguation_node(state: RouterState, config: RunnableConfig) -> dict:
@@ -547,9 +832,12 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
     g.add_node("route_entry", route_entry_node)
     g.add_node("classify_intent", classify_intent_node)
     g.add_node("resolve_assignment", resolve_assignment_node)
+    g.add_node("resolve_email", resolve_email_node)
     g.add_node("resolve_pending_item", resolve_pending_item_node)
     g.add_node("handle_confirmation", handle_confirmation_node)
     g.add_node("handle_disambiguation", handle_disambiguation_node)
+    g.add_node("handle_email_confirmation", handle_email_confirmation_node)
+    g.add_node("handle_email_disambiguation", handle_email_disambiguation_node)
     g.add_node("handle_pending_item_reply", handle_pending_item_reply)
     g.add_node("handle_pending_item_disambiguation", handle_pending_item_disambiguation_node)
     g.add_node("answer_question_node", answer_question_node)
@@ -564,6 +852,8 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
             "classify_intent": "classify_intent",
             "handle_confirmation": "handle_confirmation",
             "handle_disambiguation": "handle_disambiguation",
+            "handle_email_confirmation": "handle_email_confirmation",
+            "handle_email_disambiguation": "handle_email_disambiguation",
             "handle_pending_item_disambiguation": "handle_pending_item_disambiguation",
             "handle_pending_item_reply": "handle_pending_item_reply",
         },
@@ -575,6 +865,7 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
             "answer_question_node": "answer_question_node",
             "fallback_node": "fallback_node",
             "resolve_assignment": "resolve_assignment",
+            "resolve_email": "resolve_email",
             "resolve_pending_item": "resolve_pending_item",
             "send_reply": "send_reply",
         },
@@ -583,9 +874,12 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
         "answer_question_node",
         "fallback_node",
         "resolve_assignment",
+        "resolve_email",
         "resolve_pending_item",
         "handle_confirmation",
         "handle_disambiguation",
+        "handle_email_confirmation",
+        "handle_email_disambiguation",
         "handle_pending_item_reply",
         "handle_pending_item_disambiguation",
     ):

@@ -34,6 +34,7 @@ def _build_app() -> FastAPI:
     app.state.graph.ainvoke = AsyncMock()
     app.state.genai_client = MagicMock()
     app.state.assignment_graph = MagicMock()
+    app.state.email_graph = MagicMock()
     app.state.background_tasks = set()
     return app
 

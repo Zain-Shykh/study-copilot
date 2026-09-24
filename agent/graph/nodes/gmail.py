@@ -1,5 +1,8 @@
 """Gmail API calls: read/search/summarize, draft, send."""
 
+import base64
+from email.mime.text import MIMEText
+
 from googleapiclient.errors import HttpError
 
 
@@ -11,17 +14,19 @@ def _get_message_metadata(gmail_service, message_id: str) -> dict:
             userId="me",
             id=message_id,
             format="metadata",
-            metadataHeaders=["From", "Subject", "Date"],
+            metadataHeaders=["From", "Subject", "Date", "Message-ID"],
         )
         .execute(num_retries=3)
     )
     headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
     return {
         "id": msg["id"],
+        "thread_id": msg["threadId"],
         "from": headers.get("From", ""),
         "subject": headers.get("Subject", ""),
         "date": headers.get("Date", ""),
         "snippet": msg.get("snippet", ""),
+        "message_id_header": headers.get("Message-ID", ""),
     }
 
 
@@ -89,3 +94,57 @@ def build_query(intent_args: dict, unread_only: bool) -> str:
     if not parts and unread_only:
         parts.append("is:unread")
     return " ".join(parts)
+
+
+def get_message_body(gmail_service, message_id: str) -> str:
+    """Returns the plain-text body of one message, or "" if it has no
+    text/plain part (e.g. an HTML-only email) — callers treat that as
+    "body unavailable" rather than attempting a lossy HTML-to-text
+    conversion, consistent with "never fabricate"."""
+    msg = (
+        gmail_service.users()
+        .messages()
+        .get(userId="me", id=message_id, format="full")
+        .execute(num_retries=3)
+    )
+
+    def _find_text_plain(payload: dict) -> str | None:
+        if payload.get("mimeType") == "text/plain" and payload.get("body", {}).get("data"):
+            return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
+        for part in payload.get("parts", []):
+            found = _find_text_plain(part)
+            if found is not None:
+                return found
+        return None
+
+    return _find_text_plain(msg["payload"]) or ""
+
+
+def send_message(
+    gmail_service,
+    to: str,
+    subject: str,
+    body: str,
+    *,
+    in_reply_to_header: str | None = None,
+    thread_id: str | None = None,
+) -> str:
+    """Sends a new message, or a reply when in_reply_to_header/thread_id
+    are given (sets In-Reply-To/References for correct threading in email
+    clients, and Gmail's own threadId for correct threading in the Gmail
+    UI). Returns the sent message's Gmail id. Raises HttpError on failure —
+    the caller decides how to report/retry."""
+    msg = MIMEText(body)
+    msg["To"] = to
+    msg["Subject"] = subject
+    if in_reply_to_header:
+        msg["In-Reply-To"] = in_reply_to_header
+        msg["References"] = in_reply_to_header
+
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    body_payload: dict = {"raw": raw}
+    if thread_id:
+        body_payload["threadId"] = thread_id
+
+    sent = gmail_service.users().messages().send(userId="me", body=body_payload).execute(num_retries=3)
+    return sent["id"]

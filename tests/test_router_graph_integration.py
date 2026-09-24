@@ -27,6 +27,7 @@ def _base_config(**overrides) -> dict:
         "whatsapp_access_token": "test-token",
         "whatsapp_phone_number_id": "phone123",
         "assignment_graph": MagicMock(),
+        "email_graph": MagicMock(),
         "background_tasks": set(),
     }
     configurable.update(overrides)
@@ -153,7 +154,7 @@ def test_respond_to_pending_with_nothing_pending(monkeypatch, graph):
         rg_module, "classify_intent",
         MagicMock(return_value=("respond_to_pending", {})),
     )
-    monkeypatch.setattr(rg_module.repo, "list_pending_items", lambda conn, kind: [])
+    monkeypatch.setattr(rg_module.repo, "list_pending_items", lambda conn, item_type=None: [])
     sent = _patch_send(monkeypatch)
 
     asyncio.run(graph.ainvoke(_inbound("yes"), config=_base_config()))

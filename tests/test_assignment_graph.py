@@ -148,6 +148,40 @@ class TestDraftNode:
 
         assert result == {"failure_text": 'Drafting "HW1" failed: timed out'}
 
+    def test_student_info_is_forwarded_to_claude_code(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ag.paths, "assignment_dir", lambda course, title: tmp_path)
+        run_mock = AsyncMock(
+            return_value={
+                "success": True,
+                "submission_files": [tmp_path / "submission" / "main.py"],
+                "manifest": {"format": "as-is", "files": ["main.py"]},
+                "summary_text": "Done.",
+                "session_id": "sess1",
+            }
+        )
+        monkeypatch.setattr(ag.claude_code, "run_claude_code", run_mock)
+
+        asyncio.run(ag.draft_node(dict(STATE), _config(student_info="Roll number: 22-CS-045")))
+
+        run_mock.assert_awaited_once_with(tmp_path, student_info="Roll number: 22-CS-045")
+
+    def test_missing_student_info_defaults_to_empty_string(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ag.paths, "assignment_dir", lambda course, title: tmp_path)
+        run_mock = AsyncMock(
+            return_value={
+                "success": True,
+                "submission_files": [tmp_path / "submission" / "main.py"],
+                "manifest": {"format": "as-is", "files": ["main.py"]},
+                "summary_text": "Done.",
+                "session_id": "sess1",
+            }
+        )
+        monkeypatch.setattr(ag.claude_code, "run_claude_code", run_mock)
+
+        asyncio.run(ag.draft_node(dict(STATE), _config()))
+
+        run_mock.assert_awaited_once_with(tmp_path, student_info="")
+
 
 class TestReviseNode:
     def test_resumes_session_with_feedback(self, tmp_path, monkeypatch):
@@ -533,6 +567,64 @@ class TestPackageSubmission:
 
         assert result == [tmp_path / "essay.docx"]
         assert convert_mock.call_args[1]["extra_args"] == []
+
+    def test_zip_output_name_overrides_title_derived_name(self, tmp_path):
+        submission_dir = tmp_path / "submission"
+        submission_dir.mkdir()
+        (submission_dir / "main.py").write_text("print(1)")
+
+        result = ag._package_submission(
+            {"format": "zip", "files": ["main.py"], "output_name": "22-CS-045"},
+            submission_dir,
+            tmp_path,
+            "HW 1",
+        )
+
+        assert result == [tmp_path / "22-cs-045.zip"]
+
+    def test_pdf_output_name_overrides_stem_for_single_file(self, tmp_path, monkeypatch):
+        submission_dir = tmp_path / "submission"
+        submission_dir.mkdir()
+        (submission_dir / "essay.md").write_text("# Essay")
+        monkeypatch.setattr(ag.pypandoc, "convert_file", MagicMock())
+
+        result = ag._package_submission(
+            {"format": "pdf", "files": ["essay.md"], "output_name": "22-CS-045"},
+            submission_dir,
+            tmp_path,
+            "HW1",
+        )
+
+        assert result == [tmp_path / "22-cs-045.pdf"]
+
+    def test_pdf_output_name_ignored_when_multiple_files(self, tmp_path, monkeypatch):
+        submission_dir = tmp_path / "submission"
+        submission_dir.mkdir()
+        (submission_dir / "a.md").write_text("a")
+        (submission_dir / "b.md").write_text("b")
+        monkeypatch.setattr(ag.pypandoc, "convert_file", MagicMock())
+
+        result = ag._package_submission(
+            {"format": "pdf", "files": ["a.md", "b.md"], "output_name": "22-CS-045"},
+            submission_dir,
+            tmp_path,
+            "HW1",
+        )
+
+        assert result == [tmp_path / "a.pdf", tmp_path / "b.pdf"]
+
+    def test_as_is_ignores_output_name(self, tmp_path):
+        submission_dir = tmp_path / "submission"
+        submission_dir.mkdir()
+
+        result = ag._package_submission(
+            {"format": "as-is", "files": ["main.py"], "output_name": "22-CS-045"},
+            submission_dir,
+            tmp_path,
+            "HW1",
+        )
+
+        assert result == [submission_dir / "main.py"]
 
 
 class TestUploadToDrive:

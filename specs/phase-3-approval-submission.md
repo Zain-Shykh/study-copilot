@@ -371,17 +371,46 @@ declaring how the main agent should package it, still alongside
 `summary.txt`. This is a genuine revision to Phase 2's already-implemented
 behavior, not purely additive — see §5.4 for the manifest's exact shape.
 
+**Post-launch fix**: `DRAFT_PROMPT` was renamed to `DRAFT_PROMPT_TEMPLATE`
+and gained two additions, found via a live failure (a real assignment whose
+brief said "name the zip your roll number" — Claude Code had no way to know
+the roll number, and `_package_submission`, see §5.4, always derived the
+final packaged filename from the assignment title, ignoring any name Claude
+Code might have wanted):
+- A `__STUDENT_INFO__` placeholder (filled at call time by
+  `_build_draft_prompt(student_info)`, a plain `.replace()` — not
+  `.format()`, since the prompt's own JSON example already contains literal
+  `{}` that would collide with format-string syntax) telling Claude Code
+  what identifying info to use if the assignment asks for it, with an
+  explicit fallback instructing it to flag the gap in `summary.txt` instead
+  of guessing when none is configured (`STUDENT_INFO` env var, threaded
+  through `Settings` → the router's `configurable["student_info"]` →
+  `run_assignment_flow` → the assignment graph's own config →
+  `draft_node` → `run_claude_code(..., student_info=...)`; `revise_node`
+  does *not* re-supply it, since a `--resume`d session already has it from
+  turn one).
+- An optional `"output_name"` field in the `submission_manifest.json`
+  schema (below), for when the assignment specifies an exact name for the
+  packaged `zip`/`pdf`/`docx` output — ignored for `"as-is"`, where naming
+  is already fully under Claude Code's control via the filename it chooses
+  under `submission/`.
+
 ```python
-DRAFT_PROMPT = """\
-Read every file under source-material/ in this directory. task-brief.md \
-always describes the assignment, including any stated submission \
-requirements — format (e.g. "submit as a single PDF", "zip your .py \
-files"), and structure (e.g. "include a src/ folder and a README", a \
-required project layout). Follow them exactly, producing the complete, \
-actual assignment response — not just a matching file type. If nothing is \
-stated, use your judgment based on the nature of the response (prose -> a \
-single Markdown file, a small script -> one file, a larger project -> \
-whatever files/folders it actually needs).
+DRAFT_PROMPT_TEMPLATE = """\
+Read every file under source-material/ in this directory (including \
+anything inside an extracted subfolder). task-brief.md always describes \
+the assignment, including any stated submission requirements — format \
+(e.g. "submit as a single PDF", "zip your .py files"), and structure (e.g. \
+"include a src/ folder and a README", a required project layout). Follow \
+them exactly, producing the complete, actual assignment response — not \
+just a matching file type. If nothing is stated, use your judgment based \
+on the nature of the response (prose -> a single Markdown file, a small \
+script -> one file, a larger project -> whatever files/folders it \
+actually needs).
+
+If the assignment asks you to identify yourself in the submission or its \
+filename (e.g. a roll number, student ID, or name), use exactly this: \
+__STUDENT_INFO__
 
 Write your complete response under submission/ in this directory — one or \
 more files, organized into subfolders if the required structure calls for \
@@ -391,11 +420,13 @@ etc. for code, and so on). You cannot produce a .zip or a real .pdf \
 yourself, so never write one directly — instead, also write \
 submission_manifest.json in this directory (not under submission/) \
 describing how those files should be packaged:
-  {"format": "as-is" | "zip" | "pdf" | "docx", "files": ["<paths relative to submission/, e.g. src/main.py>"]}
+  {"format": "as-is" | "zip" | "pdf" | "docx", "files": ["<paths relative to submission/, e.g. src/main.py>"], "output_name": "<optional, no extension>"}
 - "as-is": upload each listed file unchanged (e.g. a single .py file, or \
   Classroom accepts multiple separate attachments). Only valid for flat \
   files directly under submission/ — no subfolders, since loose uploads \
-  can't preserve a folder structure.
+  can't preserve a folder structure. Name the file itself under \
+  submission/ exactly as the assignment requires — "output_name" is \
+  ignored for this format.
 - "zip": bundle every listed file into one .zip archive, preserving \
   whatever subfolder structure it's in under submission/. Required \
   whenever submission/ has more than a flat list of files, or the \
@@ -404,12 +435,22 @@ describing how those files should be packaged:
   no subfolders) to that format, one output file per input file listed.
 Use "as-is" for a single flat file, "zip" whenever there's a real folder \
 structure or the assignment explicitly asks for one, otherwise follow \
-whatever specific format the assignment states.
+whatever specific format the assignment states. Set "output_name" only \
+when the assignment specifies an exact filename for the packaged "zip"/\
+"pdf"/"docx" output (e.g. "submit a zip named your roll number") — omit \
+it otherwise.
 
 When done, also write a short plain-text summary (sources used, key \
 assumptions made, anything you couldn't find or access) to summary.txt in \
 this directory.
 """
+
+_NO_STUDENT_INFO = (
+    "not configured — if the assignment needs one, say so in summary.txt instead of guessing"
+)
+
+def _build_draft_prompt(student_info: str) -> str:
+    return DRAFT_PROMPT_TEMPLATE.replace("__STUDENT_INFO__", student_info or _NO_STUDENT_INFO)
 
 REVISE_PROMPT_TEMPLATE = """\
 The user reviewed your submission and asked for these changes:
@@ -428,27 +469,34 @@ and what changed in this revision).
 
 
 async def run_claude_code(
-    workspace_dir: Path, *, resume_session_id: str | None = None, feedback: str | None = None
+    workspace_dir: Path, *, resume_session_id: str | None = None, feedback: str | None = None,
+    student_info: str = "",
 ) -> dict:
     """Runs a headless Claude Code session scoped to workspace_dir. A fresh
-    submission when resume_session_id is None; otherwise resumes that
-    session with feedback as a revision request. Same return shape either
-    way: {"success": True, "session_id":..., "submission_files": [Path,...],
-    "manifest": {...}, "summary_text":...} or {"success": False, "error":...}
-    — success now also requires submission/ to be non-empty and
-    submission_manifest.json to exist and parse with a valid "format"
-    (one of as-is/zip/pdf/docx) and non-empty "files" list, each of which
-    must actually exist under submission/ (paths may be nested, e.g.
-    "src/main.py"). Additionally, "as-is"/"pdf"/"docx" require every listed
+    submission when resume_session_id is None (student_info given to
+    _build_draft_prompt for it); otherwise resumes that session with
+    feedback as a revision request — student_info is not re-supplied here,
+    since the resumed session already has it from turn one. Same return
+    shape either way: {"success": True, "session_id":..., "submission_files":
+    [Path,...], "manifest": {...}, "summary_text":...} or
+    {"success": False, "error":...} — success now also requires submission/
+    to be non-empty and submission_manifest.json to exist and parse with a
+    valid "format" (one of as-is/zip/pdf/docx), non-empty "files" list
+    (each of which must actually exist under submission/, paths may be
+    nested e.g. "src/main.py"), and, if present, a non-empty string
+    "output_name". Additionally, "as-is"/"pdf"/"docx" require every listed
     path to be flat (no "/") — those can't represent a folder structure;
     only "zip" may list nested paths. Any of that being violated is
     treated as a failed run, same as a missing draft.md was in Phase 2."""
-    prompt = DRAFT_PROMPT if resume_session_id is None else REVISE_PROMPT_TEMPLATE.format(feedback=feedback)
+    prompt = (
+        _build_draft_prompt(student_info) if resume_session_id is None
+        else REVISE_PROMPT_TEMPLATE.format(feedback=feedback)
+    )
 
     args = [
         "claude", "-p", prompt,
         "--output-format", "json",
-        "--allowedTools", "Read,Write,WebSearch,WebFetch",
+        "--allowedTools", "Read,Write,Edit,WebSearch,WebFetch",
     ]
     if resume_session_id:
         args += ["--resume", resume_session_id]
@@ -459,9 +507,23 @@ async def run_claude_code(
 ```
 
 Everything else in this file (the lock, the env stripping, the timeout,
-`--allowedTools` staying at `Read,Write,WebSearch,WebFetch` with no `Bash`)
-is unchanged from Phase 2 — see Decision #8 for why `Bash` still isn't
-granted even though this phase adds zip/PDF output.
+`Bash` never being granted) is unchanged from Phase 2 — see Decision #8 for
+why `Bash` still isn't granted even though this phase adds zip/PDF output.
+
+**Post-launch fix**: `--allowedTools` gained `Edit` (now
+`Read,Write,Edit,WebSearch,WebFetch`). Found via a live failure whose actual
+Claude Code session transcript (stored locally by the CLI itself, under
+`~/.claude/projects/<hashed-workspace-path>/`) showed the run had, in fact,
+completed all the coding work and then tried an `Edit` on a file it had
+already `Write`n — which wasn't in the allowed list, so the CLI blocked it
+pending interactive approval that a headless (`-p`) session can never
+receive. The session's own final message: *"This is waiting on your
+permission approval to edit `game.py`... so I can continue."* — then the
+process exits (returncode 0) without ever reaching the
+`submission_manifest.json`/`summary.txt` instructions, which is what
+actually produced the "Claude Code finished without writing
+submission_manifest.json" failure text. `Write`-then-`Edit` on the same
+file is an ordinary, common coding pattern, so this wasn't an edge case.
 
 ---
 
@@ -562,7 +624,7 @@ so every downstream node works off `submission_files`/`manifest` instead.
      - `"as-is"`: each file in `manifest["files"]` is uploaded to Drive
        unchanged.
      - `"zip"`: `zipfile.ZipFile` bundles every file in `manifest["files"]`
-       into one `<title>.zip` under the assignment folder, writing each
+       into one `<base_name>.zip` under the assignment folder, writing each
        with `arcname` set to its listed relative path — so a nested path
        like `src/main.py` ends up at the same `src/main.py` location
        inside the archive, exactly reproducing whatever folder structure
@@ -571,7 +633,15 @@ so every downstream node works off `submission_files`/`manifest` instead.
      - `"pdf"` / `"docx"`: `pypandoc.convert_file` converts each listed
        file individually to that format (source files must be Markdown/
        text — Claude Code only ever writes text, per §4), then each
-       converted output is uploaded.
+       converted output is uploaded. When `manifest["output_name"]` is set
+       and there's exactly one file, that file's output is named
+       `<base_name>.{format}` instead of `<stem>.{format}` — with more than
+       one file there's no single unambiguous name to apply, so each keeps
+       its own stem.
+     - `base_name` (post-launch fix) is `slugify(manifest["output_name"])`
+       when that field is set, else `slugify(title)` as before — see §5.4.
+       `"as-is"` ignores it entirely, since each file already keeps the
+       name Claude Code gave it under `submission/`.
   2. Each upload is `drive_service.files().create(body={"name": ...}, media_body=MediaFileUpload(...)).execute()`
      followed by a `.get(fileId=..., fields="webViewLink")` call for its
      link. No `permissions().create` call — see Decision #2.
@@ -632,7 +702,8 @@ Shape:
 ```json
 {
   "format": "as-is" | "zip" | "pdf" | "docx",
-  "files": ["<path relative to submission/, e.g. main.py or src/main.py>", "..."]
+  "files": ["<path relative to submission/, e.g. main.py or src/main.py>", "..."],
+  "output_name": "<optional, no extension>"
 }
 ```
 
@@ -641,6 +712,13 @@ Shape:
   real folder structure there per the assignment's required layout —
   `run_claude_code`'s success check (§4) resolves and verifies each one
   exists before reporting success.
+- `output_name` (post-launch fix) is optional; when present it must be a
+  non-empty string (`run_claude_code`'s success check rejects a blank or
+  non-string value the same way it rejects an invalid `format`). It names
+  the final packaged `"zip"`/`"pdf"`/`"docx"` output — see §5.2's
+  `submission_prep_node` bullet for exactly how — for assignments that
+  specify an exact filename (most commonly a roll number/student ID).
+  Ignored for `"as-is"`, and for `"pdf"`/`"docx"` with more than one file.
 - **Only `"zip"` may list nested paths.** `"as-is"`/`"pdf"`/`"docx"`
   require every listed path to be flat (no subfolder) — a loose upload or
   a Pandoc conversion can't represent a folder structure, only a single
@@ -863,12 +941,16 @@ acceptance criteria (per Decision #8, not in the original plan text):
 |---|---|
 | `agent/db/repo.py` | Add `get_claude_session`, `create_pending_item`, `get_pending_item`, `list_pending_items`, `close_pending_item` |
 | `agent/llm.py` | Add `respond_to_pending` intent + `pending_item_reference` arg; add `REVIEW_DECLARATION`/`parse_review_reply` |
-| `agent/graph/nodes/claude_code.py` | `run_claude_code` gains `resume_session_id`/`feedback` params, `REVISE_PROMPT_TEMPLATE`; **`DRAFT_PROMPT` rewritten** and the success check changed to require `submission/` + a valid `submission_manifest.json` instead of `draft.md` (Decision #8 — revises Phase 2 behavior) |
-| `agent/graph/assignment_graph.py` | Add `revise_node`, `await_review_node`, `parse_review_node`, `ask_submit_node`, `await_submit_node`, `parse_submit_node`, `submission_prep_node`, `relay_submit_node`; extend `AssignmentState` (`submission_files`/`manifest`/`final_files`/`drive_links` replace `draft_path`/`final_docx_path`/`drive_link`); `relay_node` now sends N documents instead of one; `submission_prep_node` branches on the manifest's format (zip via stdlib `zipfile`, pdf/docx via Pandoc, as-is direct upload) instead of a fixed Pandoc-to-docx call. **Post-launch fix**: `relay_node` no longer sends WhatsApp documents — it uploads each submission file to Drive (via the existing `_upload_to_drive` helper) and sends their links in the summary text instead |
-| `agent/graph/router_graph.py` | Add `_find_targeted_pending_item`, `handle_pending_item_reply`, `resolve_pending_item_node`, `handle_pending_item_disambiguation_node`; extend `route_entry_node`/`route_after_entry`/`route_after_classify`; guard `send_reply_node` against an absent `reply_text` |
+| `agent/graph/nodes/claude_code.py` | `run_claude_code` gains `resume_session_id`/`feedback` params, `REVISE_PROMPT_TEMPLATE`; **`DRAFT_PROMPT` rewritten** and the success check changed to require `submission/` + a valid `submission_manifest.json` instead of `draft.md` (Decision #8 — revises Phase 2 behavior). **Post-launch fix**: `--allowedTools` gains `Edit`; `DRAFT_PROMPT` → `DRAFT_PROMPT_TEMPLATE` + `_build_draft_prompt`/`student_info` param; `"output_name"` added to the manifest contract and its validation |
+| `agent/graph/nodes/drive.py` | **Post-launch fix**: `ZIP_MIMETYPES` + a zip-extraction branch (with `_safe_extract` guarding against path traversal) in `resolve_attachment`, so `.zip` attachments are no longer silently marked unsupported |
+| `agent/graph/assignment_graph.py` | Add `revise_node`, `await_review_node`, `parse_review_node`, `ask_submit_node`, `await_submit_node`, `parse_submit_node`, `submission_prep_node`, `relay_submit_node`; extend `AssignmentState` (`submission_files`/`manifest`/`final_files`/`drive_links` replace `draft_path`/`final_docx_path`/`drive_link`); `relay_node` now sends N documents instead of one; `submission_prep_node` branches on the manifest's format (zip via stdlib `zipfile`, pdf/docx via Pandoc, as-is direct upload) instead of a fixed Pandoc-to-docx call. **Post-launch fix**: `relay_node` no longer sends WhatsApp documents — it uploads each submission file to Drive (via the existing `_upload_to_drive` helper) and sends their links in the summary text instead; `draft_node` forwards `configurable["student_info"]` to `run_claude_code`; `_package_submission` honors an optional manifest `output_name` |
+| `agent/graph/router_graph.py` | Add `_find_targeted_pending_item`, `handle_pending_item_reply`, `resolve_pending_item_node`, `handle_pending_item_disambiguation_node`; extend `route_entry_node`/`route_after_entry`/`route_after_classify`; guard `send_reply_node` against an absent `reply_text`. **Post-launch fix**: `run_assignment_flow` gains a `student_info` param, threaded into the assignment graph's own `configurable` dict; its one call site (in `handle_confirmation_node`) passes `configurable.get("student_info", "")` |
 | `agent/graph/state.py` | Document the third `pending_question["kind"]` value (no new fields) |
 | `agent/graph/recovery.py` | New — `scan_for_interrupted_assignments` |
 | `agent/main.py` | Call the crash-recovery scan in `lifespan`, after both graphs are built |
+| `agent/config.py` | **Post-launch fix**: `Settings` gains `student_info: str`, read from the optional `STUDENT_INFO` env var (defaults to `""`) |
+| `agent/webhook/routes.py` | **Post-launch fix**: `_process_text_message`'s `configurable` dict gains `"student_info": settings.student_info` |
+| `.env.example` | **Post-launch fix**: document `STUDENT_INFO` (optional) |
 | `docs/implementation_plan.md` | **Recommend updating** Phase 3's acceptance criteria to drop the email-draft bullet until email drafting is its own spec'd phase |
 | `docs/product_definition.md` | **Recommend updating**: drop "sets sharing permissions so your teacher can open it" from Submission (Decision #2); drop "code submissions" from the "Out of scope (v1)" exclusion list and correct the Local Workspace layout's `final.docx` line to reflect a variable `submission/`-derived output (Decision #8); add `wkhtmltopdf` to the Pandoc Setup note (Decision #9) |
 

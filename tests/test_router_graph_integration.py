@@ -7,7 +7,7 @@ behaves identically to before, and that answer_question replies are sent
 verbatim from the model's own text."""
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -29,6 +29,7 @@ def _base_config(**overrides) -> dict:
         "assignment_graph": MagicMock(),
         "email_graph": MagicMock(),
         "background_tasks": set(),
+        "student_info": "",
     }
     configurable.update(overrides)
     return {"configurable": configurable}
@@ -160,3 +161,24 @@ def test_respond_to_pending_with_nothing_pending(monkeypatch, graph):
     asyncio.run(graph.ainvoke(_inbound("yes"), config=_base_config()))
 
     assert sent["body"] == "There's nothing pending right now."
+
+
+def test_run_assignment_flow_forwards_student_info_to_assignment_graph():
+    assignment_graph = MagicMock()
+    assignment_graph.ainvoke = AsyncMock()
+    resolved = {"course_id": "c1", "coursework_id": "cw1", "course_name": "Algorithms", "title": "HW1"}
+
+    asyncio.run(
+        rg_module.run_assignment_flow(
+            assignment_graph,
+            resolved,
+            SENDER,
+            "test-token",
+            "phone123",
+            MagicMock(),
+            "Roll number: 22-CS-045",
+        )
+    )
+
+    configurable = assignment_graph.ainvoke.call_args.kwargs["config"]["configurable"]
+    assert configurable["student_info"] == "Roll number: 22-CS-045"

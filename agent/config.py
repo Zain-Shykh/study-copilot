@@ -38,6 +38,7 @@ class Settings:
     my_whatsapp_number: str
     gemini_api_key: str
     gemini_model: str
+    student_info: str
 
 
 def load_settings() -> Settings:
@@ -63,4 +64,5 @@ def load_settings() -> Settings:
         my_whatsapp_number=os.environ["MY_WHATSAPP_NUMBER"],
         gemini_api_key=os.environ["GEMINI_API_KEY"],
         gemini_model=os.environ.get("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL,
+        student_info=os.environ.get("STUDENT_INFO", ""),
     )

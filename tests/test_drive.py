@@ -1,8 +1,12 @@
 """Unit tests for agent/graph/nodes/drive.py: attachment resolution by
-mimeType (native export / Pandoc conversion / passthrough / unsupported)."""
+mimeType (native export / Pandoc conversion / passthrough / zip / unsupported)."""
 
+import io
+import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from agent.graph.nodes import drive
 
@@ -89,3 +93,39 @@ class TestResolveAttachment:
         result = drive.resolve_attachment(service, "fid5", tmp_path)
 
         assert result is None
+
+    def test_zip_extracts_contents_into_subfolder(self, tmp_path, monkeypatch):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("util.py", "def helper(): pass")
+            zf.writestr("src/main.py", "print('hi')")
+        service = _service_returning("search.zip", "application/x-zip-compressed")
+        monkeypatch.setattr(drive, "_download_to_buffer", lambda req: buf.getvalue())
+
+        result = drive.resolve_attachment(service, "fid6", tmp_path)
+
+        assert result == tmp_path / "search"
+        assert (result / "util.py").read_text() == "def helper(): pass"
+        assert (result / "src" / "main.py").read_text() == "print('hi')"
+
+    def test_zip_application_zip_mimetype_also_handled(self, tmp_path, monkeypatch):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("a.txt", "x")
+        service = _service_returning("bundle.zip", "application/zip")
+        monkeypatch.setattr(drive, "_download_to_buffer", lambda req: buf.getvalue())
+
+        result = drive.resolve_attachment(service, "fid7", tmp_path)
+
+        assert result == tmp_path / "bundle"
+        assert (result / "a.txt").exists()
+
+    def test_zip_slip_path_traversal_is_rejected(self, tmp_path, monkeypatch):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("../../evil.txt", "pwned")
+        service = _service_returning("evil.zip", "application/zip")
+        monkeypatch.setattr(drive, "_download_to_buffer", lambda req: buf.getvalue())
+
+        with pytest.raises(ValueError, match="Unsafe path in zip"):
+            drive.resolve_attachment(service, "fid8", tmp_path)

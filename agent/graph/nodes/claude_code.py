@@ -19,16 +19,21 @@ _TIMEOUT_SECONDS = 15 * 60
 
 _VALID_FORMATS = {"as-is", "zip", "pdf", "docx"}
 
-DRAFT_PROMPT = """\
-Read every file under source-material/ in this directory. task-brief.md \
-always describes the assignment, including any stated submission \
-requirements — format (e.g. "submit as a single PDF", "zip your .py \
-files"), and structure (e.g. "include a src/ folder and a README", a \
-required project layout). Follow them exactly, producing the complete, \
-actual assignment response — not just a matching file type. If nothing is \
-stated, use your judgment based on the nature of the response (prose -> a \
-single Markdown file, a small script -> one file, a larger project -> \
-whatever files/folders it actually needs).
+DRAFT_PROMPT_TEMPLATE = """\
+Read every file under source-material/ in this directory (including \
+anything inside an extracted subfolder). task-brief.md always describes \
+the assignment, including any stated submission requirements — format \
+(e.g. "submit as a single PDF", "zip your .py files"), and structure (e.g. \
+"include a src/ folder and a README", a required project layout). Follow \
+them exactly, producing the complete, actual assignment response — not \
+just a matching file type. If nothing is stated, use your judgment based \
+on the nature of the response (prose -> a single Markdown file, a small \
+script -> one file, a larger project -> whatever files/folders it \
+actually needs).
+
+If the assignment asks you to identify yourself in the submission or its \
+filename (e.g. a roll number, student ID, or name), use exactly this: \
+__STUDENT_INFO__
 
 Write your complete response under submission/ in this directory — one or \
 more files, organized into subfolders if the required structure calls for \
@@ -38,11 +43,13 @@ etc. for code, and so on). You cannot produce a .zip or a real .pdf \
 yourself, so never write one directly — instead, also write \
 submission_manifest.json in this directory (not under submission/) \
 describing how those files should be packaged:
-  {"format": "as-is" | "zip" | "pdf" | "docx", "files": ["<paths relative to submission/, e.g. src/main.py>"]}
+  {"format": "as-is" | "zip" | "pdf" | "docx", "files": ["<paths relative to submission/, e.g. src/main.py>"], "output_name": "<optional, no extension>"}
 - "as-is": upload each listed file unchanged (e.g. a single .py file, or \
   Classroom accepts multiple separate attachments). Only valid for flat \
   files directly under submission/ — no subfolders, since loose uploads \
-  can't preserve a folder structure.
+  can't preserve a folder structure. Name the file itself under \
+  submission/ exactly as the assignment requires — "output_name" is \
+  ignored for this format.
 - "zip": bundle every listed file into one .zip archive, preserving \
   whatever subfolder structure it's in under submission/. Required \
   whenever submission/ has more than a flat list of files, or the \
@@ -51,12 +58,24 @@ describing how those files should be packaged:
   no subfolders) to that format, one output file per input file listed.
 Use "as-is" for a single flat file, "zip" whenever there's a real folder \
 structure or the assignment explicitly asks for one, otherwise follow \
-whatever specific format the assignment states.
+whatever specific format the assignment states. Set "output_name" only \
+when the assignment specifies an exact filename for the packaged "zip"/\
+"pdf"/"docx" output (e.g. "submit a zip named your roll number") — omit \
+it otherwise.
 
 When done, also write a short plain-text summary (sources used, key \
 assumptions made, anything you couldn't find or access) to summary.txt in \
 this directory.
 """
+
+_NO_STUDENT_INFO = (
+    "not configured — if the assignment needs one, say so in summary.txt instead of guessing"
+)
+
+
+def _build_draft_prompt(student_info: str) -> str:
+    return DRAFT_PROMPT_TEMPLATE.replace("__STUDENT_INFO__", student_info or _NO_STUDENT_INFO)
+
 
 REVISE_PROMPT_TEMPLATE = """\
 The user reviewed your submission and asked for these changes:
@@ -76,7 +95,7 @@ and what changed in this revision).
 
 def _validate_manifest(workspace_dir: Path) -> dict | str:
     """Returns the parsed manifest dict on success, or an error string on
-    any violation of the contract described in DRAFT_PROMPT/REVISE_PROMPT_TEMPLATE."""
+    any violation of the contract described in DRAFT_PROMPT_TEMPLATE/REVISE_PROMPT_TEMPLATE."""
     submission_dir = workspace_dir / "submission"
     if not submission_dir.is_dir() or not any(submission_dir.iterdir()):
         return "Claude Code finished without writing anything under submission/"
@@ -98,6 +117,10 @@ def _validate_manifest(workspace_dir: Path) -> dict | str:
     if not files or not isinstance(files, list):
         return 'submission_manifest.json has an empty or missing "files" list'
 
+    output_name = manifest.get("output_name")
+    if output_name is not None and (not isinstance(output_name, str) or not output_name.strip()):
+        return 'submission_manifest.json has an invalid "output_name"'
+
     for rel_path in files:
         if "/" in rel_path or "\\" in rel_path:
             if format_ != "zip":
@@ -112,12 +135,18 @@ def _validate_manifest(workspace_dir: Path) -> dict | str:
 
 
 async def run_claude_code(
-    workspace_dir: Path, *, resume_session_id: str | None = None, feedback: str | None = None
+    workspace_dir: Path,
+    *,
+    resume_session_id: str | None = None,
+    feedback: str | None = None,
+    student_info: str = "",
 ) -> dict:
     """Runs a headless Claude Code session scoped to workspace_dir, no Bash,
     no broader filesystem, no Google credentials in its environment. A
-    fresh submission when resume_session_id is None; otherwise resumes
-    that session with feedback as a revision request.
+    fresh submission when resume_session_id is None (student_info, if set,
+    is given to it for filenames/output naming the assignment asks to be
+    personalized); otherwise resumes that session with feedback as a
+    revision request.
 
     Returns {"success": True, "session_id": ..., "submission_files": [Path, ...],
     "manifest": {...}, "summary_text": ...} on success, or
@@ -128,7 +157,11 @@ async def run_claude_code(
     format) — same "reported as a failed run" handling as a missing
     draft.md was in Phase 2.
     """
-    prompt = DRAFT_PROMPT if resume_session_id is None else REVISE_PROMPT_TEMPLATE.format(feedback=feedback)
+    prompt = (
+        _build_draft_prompt(student_info)
+        if resume_session_id is None
+        else REVISE_PROMPT_TEMPLATE.format(feedback=feedback)
+    )
 
     subprocess_env = {
         k: v
@@ -143,7 +176,7 @@ async def run_claude_code(
         "--output-format",
         "json",
         "--allowedTools",
-        "Read,Write,WebSearch,WebFetch",
+        "Read,Write,Edit,WebSearch,WebFetch",
     ]
     if resume_session_id:
         args += ["--resume", resume_session_id]

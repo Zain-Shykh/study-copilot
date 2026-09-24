@@ -2,6 +2,7 @@
 
 import io
 import tempfile
+import zipfile
 from pathlib import Path
 
 import pypandoc
@@ -25,7 +26,20 @@ PANDOC_CONVERTIBLE_MIMETYPES = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # .pptx
 }
 
+ZIP_MIMETYPES = {"application/zip", "application/x-zip-compressed"}
+
 PASSTHROUGH_PREFIXES = ("application/pdf", "image/")
+
+
+def _safe_extract(zf: zipfile.ZipFile, target_dir: Path) -> None:
+    """Extracts zf into target_dir, refusing any entry whose path would
+    land outside target_dir (a malicious/malformed zip using ".." or an
+    absolute path — "zip slip")."""
+    target_dir = target_dir.resolve()
+    for member in zf.namelist():
+        if not (target_dir / member).resolve().is_relative_to(target_dir):
+            raise ValueError(f"Unsafe path in zip archive: {member!r}")
+    zf.extractall(target_dir)
 
 
 def _download_to_buffer(request) -> bytes:
@@ -77,5 +91,13 @@ def resolve_attachment(drive_service, drive_file_id: str, dest_dir: Path) -> Pat
         dest_path = dest_dir / name
         dest_path.write_bytes(content)
         return dest_path
+
+    if mime_type in ZIP_MIMETYPES:
+        content = _download_to_buffer(drive_service.files().get_media(fileId=drive_file_id))
+        extract_dir = dest_dir / slugify(Path(name).stem)
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            _safe_extract(zf, extract_dir)
+        return extract_dir
 
     return None

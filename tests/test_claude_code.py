@@ -131,6 +131,43 @@ class TestValidateManifest:
 
         assert result == {"format": "as-is", "files": ["main.py"]}
 
+    def test_output_name_absent_is_valid(self, tmp_path):
+        workspace = _valid_workspace(tmp_path)
+
+        result = claude_code._validate_manifest(workspace)
+
+        assert isinstance(result, dict)
+
+    def test_output_name_present_and_valid(self, tmp_path):
+        (tmp_path / "submission").mkdir()
+        (tmp_path / "submission" / "main.py").write_text("x")
+        manifest = {"format": "as-is", "files": ["main.py"], "output_name": "22-cs-045"}
+        (tmp_path / "submission_manifest.json").write_text(json.dumps(manifest))
+
+        result = claude_code._validate_manifest(tmp_path)
+
+        assert result == manifest
+
+    def test_output_name_blank_is_rejected(self, tmp_path):
+        (tmp_path / "submission").mkdir()
+        (tmp_path / "submission" / "main.py").write_text("x")
+        manifest = {"format": "as-is", "files": ["main.py"], "output_name": "   "}
+        (tmp_path / "submission_manifest.json").write_text(json.dumps(manifest))
+
+        result = claude_code._validate_manifest(tmp_path)
+
+        assert result == 'submission_manifest.json has an invalid "output_name"'
+
+    def test_output_name_wrong_type_is_rejected(self, tmp_path):
+        (tmp_path / "submission").mkdir()
+        (tmp_path / "submission" / "main.py").write_text("x")
+        manifest = {"format": "as-is", "files": ["main.py"], "output_name": 5}
+        (tmp_path / "submission_manifest.json").write_text(json.dumps(manifest))
+
+        result = claude_code._validate_manifest(tmp_path)
+
+        assert result == 'submission_manifest.json has an invalid "output_name"'
+
 
 class TestRunClaudeCode:
     def test_success_fresh_draft_returns_full_result(self, tmp_path, monkeypatch):
@@ -148,9 +185,39 @@ class TestRunClaudeCode:
             "manifest": {"format": "as-is", "files": ["main.py"]},
             "summary_text": "Used the textbook.",
         }
-        assert claude_code.DRAFT_PROMPT in captured["args"]
+        assert claude_code._build_draft_prompt("") in captured["args"]
         assert "--resume" not in captured["args"]
         assert captured["kwargs"]["cwd"] == workspace
+
+    def test_allowed_tools_includes_edit(self, tmp_path, monkeypatch):
+        workspace = _valid_workspace(tmp_path)
+        process = FakeProcess(stdout=json.dumps({"session_id": "s"}).encode(), returncode=0)
+        captured = _patch_subprocess(monkeypatch, process)
+
+        asyncio.run(claude_code.run_claude_code(workspace))
+
+        args = captured["args"]
+        assert args[args.index("--allowedTools") + 1] == "Read,Write,Edit,WebSearch,WebFetch"
+
+    def test_student_info_is_interpolated_into_prompt(self, tmp_path, monkeypatch):
+        workspace = _valid_workspace(tmp_path)
+        process = FakeProcess(stdout=json.dumps({"session_id": "s"}).encode(), returncode=0)
+        captured = _patch_subprocess(monkeypatch, process)
+
+        asyncio.run(claude_code.run_claude_code(workspace, student_info="Roll number: 22-CS-045"))
+
+        prompt = captured["args"][captured["args"].index("-p") + 1]
+        assert "Roll number: 22-CS-045" in prompt
+
+    def test_missing_student_info_uses_fallback_text(self, tmp_path, monkeypatch):
+        workspace = _valid_workspace(tmp_path)
+        process = FakeProcess(stdout=json.dumps({"session_id": "s"}).encode(), returncode=0)
+        captured = _patch_subprocess(monkeypatch, process)
+
+        asyncio.run(claude_code.run_claude_code(workspace))
+
+        prompt = captured["args"][captured["args"].index("-p") + 1]
+        assert claude_code._NO_STUDENT_INFO in prompt
 
     def test_revision_uses_resume_and_feedback_prompt(self, tmp_path, monkeypatch):
         workspace = _valid_workspace(tmp_path)

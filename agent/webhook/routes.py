@@ -93,6 +93,7 @@ async def _process_text_message(
                     "assignment_graph": request.app.state.assignment_graph,
                     "email_graph": request.app.state.email_graph,
                     "background_tasks": request.app.state.background_tasks,
+                    "student_info": settings.student_info,
                 }
             },
         )

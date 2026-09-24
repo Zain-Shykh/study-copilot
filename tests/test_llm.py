@@ -101,8 +101,8 @@ class TestClassifyIntent:
         with pytest.raises(RuntimeError, match="still down"):
             llm.classify_intent(client, "gemini-x", "hi")
 
-        # 3 primary attempts + 1 fallback-model attempt
-        assert client.models.generate_content.call_count == 4
+        # 3 primary attempts + 3 fallback-model attempts
+        assert client.models.generate_content.call_count == 6
         assert client.models.generate_content.call_args.kwargs["model"] == llm.FALLBACK_MODEL
 
     @patch("agent.llm.time.sleep")
@@ -119,6 +119,26 @@ class TestClassifyIntent:
 
         assert intent == "answer_question"
         assert client.models.generate_content.call_count == 4
+        assert client.models.generate_content.call_args.kwargs["model"] == llm.FALLBACK_MODEL
+
+    @patch("agent.llm.time.sleep")
+    def test_fallback_model_itself_retries_on_transient_failure(self, mock_sleep):
+        """The fallback model has shown the same transient-failure pattern
+        as the primary in practice, so it must get its own retries rather
+        than a single unretried attempt."""
+        client = MagicMock()
+        client.models.generate_content.side_effect = [
+            RuntimeError("503"),  # primary attempt 1
+            RuntimeError("503"),  # primary attempt 2
+            RuntimeError("503"),  # primary attempt 3 - exhausted
+            RuntimeError("500"),  # fallback attempt 1
+            _response_with_function_call("route_message", {"intent": "answer_question"}),  # fallback attempt 2
+        ]
+
+        intent, args = llm.classify_intent(client, "gemini-x", "hi")
+
+        assert intent == "answer_question"
+        assert client.models.generate_content.call_count == 5
         assert client.models.generate_content.call_args.kwargs["model"] == llm.FALLBACK_MODEL
 
 
@@ -266,6 +286,6 @@ class TestDraftEmail:
         with pytest.raises(RuntimeError, match="still down"):
             llm.draft_email(client, "gemini-x", topic="hi")
 
-        # 3 primary attempts + 1 fallback-model attempt
-        assert client.models.generate_content.call_count == 4
+        # 3 primary attempts + 3 fallback-model attempts
+        assert client.models.generate_content.call_count == 6
         assert client.models.generate_content.call_args.kwargs["model"] == llm.FALLBACK_MODEL

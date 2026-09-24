@@ -157,10 +157,9 @@ present in the snippet. Structured, no preamble, no closing remarks.
 """
 
 
-def _with_retry(fn: Callable[[str], object], model: str):
+def _retry_model(fn: Callable[[str], object], model: str):
     """Calls fn(model) up to _MAX_ATTEMPTS times with exponential backoff.
-    If every attempt against the primary model fails, makes one further
-    attempt against FALLBACK_MODEL before giving up."""
+    Raises the last error once attempts are exhausted."""
     last_error = None
     for attempt in range(_MAX_ATTEMPTS):
         try:
@@ -169,15 +168,22 @@ def _with_retry(fn: Callable[[str], object], model: str):
             last_error = e
             if attempt < _MAX_ATTEMPTS - 1:
                 time.sleep(_BACKOFF_SECONDS * (2**attempt))
-
-    if model != FALLBACK_MODEL:
-        logger.warning("%s exhausted retries, falling back to %s", model, FALLBACK_MODEL)
-        try:
-            return fn(FALLBACK_MODEL)
-        except Exception as e:  # noqa: BLE001
-            last_error = e
-
     raise last_error
+
+
+def _with_retry(fn: Callable[[str], object], model: str):
+    """Retries fn against model, then — if every attempt against the
+    primary model fails — retries the same way against FALLBACK_MODEL
+    before giving up. FALLBACK_MODEL has shown the same transient-failure
+    pattern as the primary model in practice, so it gets the same retry
+    treatment rather than a single unretried attempt."""
+    try:
+        return _retry_model(fn, model)
+    except Exception:
+        if model == FALLBACK_MODEL:
+            raise
+        logger.warning("%s exhausted retries, falling back to %s", model, FALLBACK_MODEL)
+        return _retry_model(fn, FALLBACK_MODEL)
 
 
 def classify_intent(client: genai.Client, model: str, text: str) -> tuple[str, dict]:

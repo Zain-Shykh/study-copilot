@@ -47,31 +47,71 @@ MATCH = {
 
 
 class TestResolveEmailNode:
-    def test_empty_target_asks_who(self, monkeypatch):
+    def test_no_address_asks_for_it_reply_mode(self, monkeypatch):
+        monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+        state = {"intent_args": {"email_mode": "reply", "email_reference": "", "email_topic": ""}}
+
+        result = asyncio.run(rg.resolve_email_node(state, _config()))
+
+        assert result["reply_text"] == "Who would you like to reply to — give me their email address?"
+        pq = result["pending_question"]
+        assert pq["kind"] == "awaiting_email_details"
+        assert pq["mode"] == "reply"
+        assert pq["address"] is None
+        assert pq["asking_for"] == "address"
+
+    def test_no_address_asks_for_it_new_mode(self, monkeypatch):
+        monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+        state = {"intent_args": {"email_mode": "new", "email_reference": "", "email_topic": ""}}
+
+        result = asyncio.run(rg.resolve_email_node(state, _config()))
+
+        assert result["reply_text"] == "Who would you like to email? Give me their email address."
+        assert result["pending_question"]["asking_for"] == "address"
+
+    def test_mode_defaults_to_new_when_omitted(self, monkeypatch):
         monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
         state = {"intent_args": {"email_reference": "", "email_topic": ""}}
 
         result = asyncio.run(rg.resolve_email_node(state, _config()))
 
-        assert result == {
-            "reply_text": "Who would you like to email, or which email are you replying to?",
-            "pending_question": None,
-        }
+        assert result["pending_question"]["mode"] == "new"
 
-    def test_literal_address_without_topic_asks_what_it_should_say(self, monkeypatch):
+    def test_non_address_reference_is_treated_as_missing(self, monkeypatch):
+        """email_reference without an "@" (e.g. a stray name/description the
+        classifier shouldn't have extracted, but might anyway) is treated
+        as no address given — never searched for by name."""
         monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
-        state = {"intent_args": {"email_reference": "jane.doe@school.edu", "email_topic": ""}}
+        list_messages_mock = MagicMock()
+        monkeypatch.setattr(rg.gmail, "list_messages", list_messages_mock)
+        state = {"intent_args": {"email_mode": "reply", "email_reference": "the registrar", "email_topic": "x"}}
 
         result = asyncio.run(rg.resolve_email_node(state, _config()))
 
-        assert result == {
-            "reply_text": "What should the email to jane.doe@school.edu say?",
-            "pending_question": None,
-        }
+        assert result["pending_question"]["asking_for"] == "address"
+        list_messages_mock.assert_not_called()
 
-    def test_literal_address_with_topic_confirms_new_mode(self, monkeypatch):
+    def test_address_without_topic_asks_what_it_should_say(self, monkeypatch):
         monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
-        state = {"intent_args": {"email_reference": "jane.doe@school.edu", "email_topic": "reschedule to Thursday"}}
+        state = {"intent_args": {"email_mode": "new", "email_reference": "jane.doe@school.edu", "email_topic": ""}}
+
+        result = asyncio.run(rg.resolve_email_node(state, _config()))
+
+        assert result["reply_text"] == "What should the email to jane.doe@school.edu say?"
+        pq = result["pending_question"]
+        assert pq["kind"] == "awaiting_email_details"
+        assert pq["address"] == "jane.doe@school.edu"
+        assert pq["asking_for"] == "topic"
+
+    def test_new_mode_with_address_and_topic_confirms(self, monkeypatch):
+        monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+        state = {
+            "intent_args": {
+                "email_mode": "new",
+                "email_reference": "jane.doe@school.edu",
+                "email_topic": "reschedule to Thursday",
+            }
+        }
 
         result = asyncio.run(rg.resolve_email_node(state, _config()))
 
@@ -81,13 +121,21 @@ class TestResolveEmailNode:
         assert resolved["recipient_email"] == "jane.doe@school.edu"
         assert "jane.doe@school.edu" in result["reply_text"]
 
-    def test_single_gmail_match_confirms_reply_mode(self, monkeypatch):
+    def test_reply_mode_searches_from_address_and_confirms(self, monkeypatch):
         monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
-        monkeypatch.setattr(rg.gmail, "list_messages", MagicMock(return_value=[MATCH]))
-        state = {"intent_args": {"email_reference": "registrar", "email_topic": "ask when it'll be ready"}}
+        list_messages_mock = MagicMock(return_value=[MATCH])
+        monkeypatch.setattr(rg.gmail, "list_messages", list_messages_mock)
+        state = {
+            "intent_args": {
+                "email_mode": "reply",
+                "email_reference": "registrar@school.edu",
+                "email_topic": "ask when it'll be ready",
+            }
+        }
 
         result = asyncio.run(rg.resolve_email_node(state, _config()))
 
+        list_messages_mock.assert_called_once_with("gmail", "from:registrar@school.edu", 1)
         resolved = result["pending_question"]["resolved"]
         assert resolved["mode"] == "reply"
         assert resolved["recipient_email"] == "registrar@school.edu"
@@ -95,32 +143,24 @@ class TestResolveEmailNode:
         assert resolved["gmail_message_id_header"] == "<orig@mail.gmail.com>"
         assert '"Your transcript"' in result["reply_text"]
 
-    def test_no_gmail_match_suggests_giving_an_address(self, monkeypatch):
+    def test_reply_mode_no_matches_from_address(self, monkeypatch):
         monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
         monkeypatch.setattr(rg.gmail, "list_messages", MagicMock(return_value=[]))
-        state = {"intent_args": {"email_reference": "the dean", "email_topic": "x"}}
+        state = {
+            "intent_args": {"email_mode": "reply", "email_reference": "nobody@school.edu", "email_topic": "x"}
+        }
 
         result = asyncio.run(rg.resolve_email_node(state, _config()))
 
-        assert "couldn't find an email matching" in result["reply_text"]
+        assert "I couldn't find any emails from nobody@school.edu" in result["reply_text"]
         assert result["pending_question"] is None
-
-    def test_multiple_gmail_matches_ask_to_disambiguate(self, monkeypatch):
-        monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
-        second = dict(MATCH, id="m2", subject="Fee deadline")
-        monkeypatch.setattr(rg.gmail, "list_messages", MagicMock(return_value=[MATCH, second]))
-        state = {"intent_args": {"email_reference": "registrar", "email_topic": "x"}}
-
-        result = asyncio.run(rg.resolve_email_node(state, _config()))
-
-        assert result["pending_question"]["kind"] == "disambiguate_email"
-        assert result["pending_question"]["candidates"] == [MATCH, second]
-        assert result["pending_question"]["topic"] == "x"
 
     def test_gmail_search_error_reports_plainly(self, monkeypatch):
         monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
         monkeypatch.setattr(rg.gmail, "list_messages", MagicMock(side_effect=_http_error()))
-        state = {"intent_args": {"email_reference": "registrar", "email_topic": "x"}}
+        state = {
+            "intent_args": {"email_mode": "reply", "email_reference": "registrar@school.edu", "email_topic": "x"}
+        }
 
         result = asyncio.run(rg.resolve_email_node(state, _config()))
 
@@ -128,39 +168,105 @@ class TestResolveEmailNode:
 
     def test_auth_failure_returns_reply_text(self, monkeypatch):
         monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: "Google access has expired")
-        state = {"intent_args": {"email_reference": "registrar", "email_topic": "x"}}
+        state = {
+            "intent_args": {"email_mode": "reply", "email_reference": "registrar@school.edu", "email_topic": "x"}
+        }
 
         result = asyncio.run(rg.resolve_email_node(state, _config()))
 
         assert result == {"reply_text": "Google access has expired"}
 
 
-class TestHandleEmailDisambiguationNode:
-    def test_valid_choice_confirms_that_match(self, monkeypatch):
-        second = dict(MATCH, id="m2", subject="Fee deadline", **{"from": "Bursar <bursar@school.edu>"})
-        monkeypatch.setattr(rg.llm, "resolve_disambiguation", lambda client, model, lines, text: 2)
+class TestHandleEmailDetailsNode:
+    def test_answers_missing_address_then_resolves_new(self, monkeypatch):
+        monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
         state = {
-            "pending_question": {"kind": "disambiguate_email", "candidates": [MATCH, second], "topic": "pay the fee"},
-            "inbound_text": "the second one",
+            "pending_question": {
+                "kind": "awaiting_email_details",
+                "mode": "new",
+                "address": None,
+                "topic": "hello there",
+                "asking_for": "address",
+            },
+            "inbound_text": "jane.doe@school.edu",
         }
 
-        result = rg.handle_email_disambiguation_node(state, _config())
+        result = rg.handle_email_details_node(state, _config())
+
+        assert result["pending_question"]["kind"] == "confirm_draft_email"
+        assert result["pending_question"]["resolved"]["recipient_email"] == "jane.doe@school.edu"
+
+    def test_answers_missing_address_still_invalid_asks_again(self, monkeypatch):
+        monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+        state = {
+            "pending_question": {
+                "kind": "awaiting_email_details",
+                "mode": "new",
+                "address": None,
+                "topic": "hello there",
+                "asking_for": "address",
+            },
+            "inbound_text": "just jane, no address",
+        }
+
+        result = rg.handle_email_details_node(state, _config())
+
+        assert result["pending_question"]["asking_for"] == "address"
+
+    def test_answers_missing_topic_then_resolves(self, monkeypatch):
+        monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+        state = {
+            "pending_question": {
+                "kind": "awaiting_email_details",
+                "mode": "new",
+                "address": "jane.doe@school.edu",
+                "topic": "",
+                "asking_for": "topic",
+            },
+            "inbound_text": "ask to reschedule to Thursday",
+        }
+
+        result = rg.handle_email_details_node(state, _config())
 
         resolved = result["pending_question"]["resolved"]
-        assert resolved["recipient_email"] == "bursar@school.edu"
-        assert resolved["topic"] == "pay the fee"
+        assert resolved["topic"] == "ask to reschedule to Thursday"
 
-    def test_unclear_choice_asks_to_rename(self, monkeypatch):
-        monkeypatch.setattr(rg.llm, "resolve_disambiguation", lambda client, model, lines, text: 0)
+    def test_reply_mode_after_address_answered_searches_gmail(self, monkeypatch):
+        monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+        list_messages_mock = MagicMock(return_value=[MATCH])
+        monkeypatch.setattr(rg.gmail, "list_messages", list_messages_mock)
         state = {
-            "pending_question": {"kind": "disambiguate_email", "candidates": [MATCH], "topic": "x"},
-            "inbound_text": "neither",
+            "pending_question": {
+                "kind": "awaiting_email_details",
+                "mode": "reply",
+                "address": None,
+                "topic": "ask when it'll be ready",
+                "asking_for": "address",
+            },
+            "inbound_text": "registrar@school.edu",
         }
 
-        result = rg.handle_email_disambiguation_node(state, _config())
+        result = rg.handle_email_details_node(state, _config())
 
-        assert "couldn't tell which one" in result["reply_text"]
-        assert result["pending_question"] is None
+        list_messages_mock.assert_called_once_with("gmail", "from:registrar@school.edu", 1)
+        assert result["pending_question"]["resolved"]["mode"] == "reply"
+
+    def test_auth_failure_returns_reply_text(self, monkeypatch):
+        monkeypatch.setattr(rg.google_auth, "load_google_clients", lambda conn: "Google access has expired")
+        state = {
+            "pending_question": {
+                "kind": "awaiting_email_details",
+                "mode": "new",
+                "address": None,
+                "topic": "x",
+                "asking_for": "address",
+            },
+            "inbound_text": "jane.doe@school.edu",
+        }
+
+        result = rg.handle_email_details_node(state, _config())
+
+        assert result == {"reply_text": "Google access has expired", "pending_question": None}
 
 
 class TestHandleEmailConfirmationNode:

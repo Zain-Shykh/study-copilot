@@ -340,7 +340,13 @@ def answer_question_node(state: RouterState, config: RunnableConfig) -> dict:
         before_date=<today>, and "today" is after_date=<today> with
         before_date left unset. Pass a higher max_results (e.g. 25)
         whenever after_date/before_date is set or gmail_query is broad, so
-        results aren't silently truncated. Leave gmail_query empty and
+        results aren't silently truncated. Results are always returned
+        newest-first, so for "most recent"/"latest"/"last email"
+        questions, do NOT write those words into gmail_query as search
+        text (Gmail would search for them literally and return
+        irrelevant matches) — leave gmail_query filtered only by real
+        criteria (sender, subject, etc., or empty for no filter) and just
+        take the first result(s). Leave gmail_query empty and
         after_date/before_date unset for a general "recent emails"
         question. Each item is {"from": str, "subject": str, "date": str,
         "snippet": str} — the snippet is a short excerpt, not the full
@@ -395,6 +401,16 @@ together with injecting `datetime.now(USER_TIMEZONE)` instead of UTC as
 "today" in `ANSWER_SYSTEM_PROMPT` — fixes a real bug where, for a user in
 Pakistan (UTC+5), any question asked between midnight and 5am local time
 computed "today" as the previous UTC day.
+
+**Post-launch fix:** the docstring's "most recent"/"latest" guidance
+(above) was added after real usage showed the model writing words like
+"last"/"most recent" directly into `gmail_query` for questions like
+"what's my most recent email?" — Gmail's search has no concept of
+"sort by recency" as a keyword; it just searches for those words
+literally, returning generic relevance-ranked (and often unrelated)
+matches instead of the actual most recent email. No code change was
+needed since results were already returned newest-first by default —
+just an explicit instruction not to encode recency as search text.
 
 ### 4. `agent/graph/router_graph.py` changes
 

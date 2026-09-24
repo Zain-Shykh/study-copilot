@@ -134,34 +134,32 @@ def answer_question_node(state: RouterState, config: RunnableConfig) -> dict:
         ]
 
     def get_recent_emails(
-        max_results: int = 10,
-        unread_only: bool = False,
-        sender: str | None = None,
-        subject_contains: str | None = None,
+        gmail_query: str = "",
         after_date: str | None = None,
         before_date: str | None = None,
+        max_results: int = 10,
     ) -> list[dict]:
-        """Returns Gmail messages (not Classroom). Use sender/subject_contains
-        when the question names a specific sender or topic; use
-        unread_only=True for "unread"/"new" email questions. Use
-        after_date/before_date (each "YYYY-MM-DD", in the user's own
-        timezone) to scope to a specific day or range instead of guessing
-        from a message's own date field — after_date is inclusive,
-        before_date is exclusive, so "yesterday" is
-        after_date=<yesterday>, before_date=<today>, and "today" is
-        after_date=<today> with before_date left unset. Pass a higher
-        max_results (e.g. 25) whenever after_date/before_date is set, so a
-        busy day isn't silently truncated. Leave all filters unset for a
-        general "recent emails" question. Each item is {"from": str,
-        "subject": str, "date": str, "snippet": str} — the snippet is a
-        short excerpt, not the full body."""
-        query_args = {
-            "email_sender": sender,
-            "email_subject": subject_contains,
-            "after_date": after_date,
-            "before_date": before_date,
-        }
-        query = gmail.build_query(query_args, unread_only=unread_only)
+        """Returns Gmail messages (not Classroom) matching gmail_query,
+        Gmail's own search syntax — the same operators you'd type into the
+        Gmail search bar, e.g. "from:prof@uni.edu", "subject:midterm",
+        "has:attachment", "is:unread", "category:updates",
+        "label:important". Combine multiple operators in one
+        space-separated string (space = AND). Use after_date/before_date
+        (each "YYYY-MM-DD", in the user's own timezone) instead of writing
+        after:/before: yourself inside gmail_query — these are computed
+        exactly server-side, whereas hand-written after:/before: dates are
+        timezone-ambiguous. after_date is inclusive, before_date is
+        exclusive, so "yesterday" is after_date=<yesterday>,
+        before_date=<today>, and "today" is after_date=<today> with
+        before_date left unset. Pass a higher max_results (e.g. 25)
+        whenever after_date/before_date is set or gmail_query is broad, so
+        results aren't silently truncated. Leave gmail_query empty and
+        after_date/before_date unset for a general "recent emails"
+        question. Each item is {"from": str, "subject": str, "date": str,
+        "snippet": str} — the snippet is a short excerpt, not the full
+        body."""
+        date_filter = gmail.build_date_filter(after_date, before_date)
+        query = " ".join(part for part in [gmail_query, date_filter] if part)
         try:
             return gmail.list_messages(gmail_service, query, max_results)
         except HttpError as e:

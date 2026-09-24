@@ -264,61 +264,56 @@ class TestGetAnnouncements:
 
 
 class TestGetRecentEmails:
-    def test_forwards_filters_and_shapes_query(self, monkeypatch):
+    def test_forwards_raw_gmail_query(self, monkeypatch):
         _stub_clients(monkeypatch)
         captured = _capture_tools(monkeypatch)
-        build_query_mock = MagicMock(return_value="from:prof@uni.edu subject:midterm")
         list_messages_mock = MagicMock(return_value=[{"from": "prof@uni.edu", "subject": "Midterm", "date": "", "snippet": ""}])
-        monkeypatch.setattr(gmail, "build_query", build_query_mock)
         monkeypatch.setattr(gmail, "list_messages", list_messages_mock)
 
         aq_module.answer_question_node({"inbound_text": "emails from prof about midterm"}, _make_config())
 
         result = captured["tools"]["get_recent_emails"](
-            max_results=5, unread_only=True, sender="prof@uni.edu", subject_contains="midterm"
+            gmail_query="from:prof@uni.edu subject:midterm has:attachment", max_results=5
         )
         assert result == [{"from": "prof@uni.edu", "subject": "Midterm", "date": "", "snippet": ""}]
-        build_query_mock.assert_called_once_with(
-            {"email_sender": "prof@uni.edu", "email_subject": "midterm", "after_date": None, "before_date": None},
-            unread_only=True,
-        )
         list_messages_mock.assert_called_once_with(
-            list_messages_mock.call_args[0][0], "from:prof@uni.edu subject:midterm", 5
+            list_messages_mock.call_args[0][0], "from:prof@uni.edu subject:midterm has:attachment", 5
         )
 
-    def test_forwards_date_range(self, monkeypatch):
+    def test_combines_gmail_query_with_date_filter(self, monkeypatch):
         _stub_clients(monkeypatch)
         captured = _capture_tools(monkeypatch)
-        build_query_mock = MagicMock(return_value="after:1758657000 before:1758743400")
-        monkeypatch.setattr(gmail, "build_query", build_query_mock)
-        monkeypatch.setattr(gmail, "list_messages", MagicMock(return_value=[]))
+        build_date_filter_mock = MagicMock(return_value="after:1790190000 before:1790276400")
+        list_messages_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(gmail, "build_date_filter", build_date_filter_mock)
+        monkeypatch.setattr(gmail, "list_messages", list_messages_mock)
 
-        aq_module.answer_question_node({"inbound_text": "emails from yesterday"}, _make_config())
+        aq_module.answer_question_node({"inbound_text": "unread emails from prof yesterday"}, _make_config())
 
-        captured["tools"]["get_recent_emails"](after_date="2026-09-24", before_date="2026-09-25")
-        build_query_mock.assert_called_once_with(
-            {"email_sender": None, "email_subject": None, "after_date": "2026-09-24", "before_date": "2026-09-25"},
-            unread_only=False,
+        captured["tools"]["get_recent_emails"](
+            gmail_query="from:prof@uni.edu is:unread", after_date="2026-09-24", before_date="2026-09-25"
+        )
+        build_date_filter_mock.assert_called_once_with("2026-09-24", "2026-09-25")
+        list_messages_mock.assert_called_once_with(
+            list_messages_mock.call_args[0][0],
+            "from:prof@uni.edu is:unread after:1790190000 before:1790276400",
+            10,
         )
 
-    def test_defaults_unset_filters_to_none(self, monkeypatch):
+    def test_defaults_to_empty_query(self, monkeypatch):
         _stub_clients(monkeypatch)
         captured = _capture_tools(monkeypatch)
-        build_query_mock = MagicMock(return_value="")
-        monkeypatch.setattr(gmail, "build_query", build_query_mock)
-        monkeypatch.setattr(gmail, "list_messages", MagicMock(return_value=[]))
+        list_messages_mock = MagicMock(return_value=[])
+        monkeypatch.setattr(gmail, "list_messages", list_messages_mock)
 
         aq_module.answer_question_node({"inbound_text": "recent emails"}, _make_config())
 
         captured["tools"]["get_recent_emails"]()
-        build_query_mock.assert_called_once_with(
-            {"email_sender": None, "email_subject": None, "after_date": None, "before_date": None}, unread_only=False
-        )
+        list_messages_mock.assert_called_once_with(list_messages_mock.call_args[0][0], "", 10)
 
     def test_http_error_returns_error_payload(self, monkeypatch):
         _stub_clients(monkeypatch)
         captured = _capture_tools(monkeypatch)
-        monkeypatch.setattr(gmail, "build_query", MagicMock(return_value=""))
         monkeypatch.setattr(gmail, "list_messages", MagicMock(side_effect=_http_error()))
 
         aq_module.answer_question_node({"inbound_text": "recent emails"}, _make_config())

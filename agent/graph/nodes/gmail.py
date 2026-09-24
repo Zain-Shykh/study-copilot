@@ -97,20 +97,18 @@ def _date_to_epoch_seconds(date_str: str) -> int:
     return int(local_midnight.timestamp())
 
 
-def build_query(intent_args: dict, unread_only: bool) -> str:
+def build_date_filter(after_date: str | None, before_date: str | None) -> str:
+    """Converts after_date/before_date ("YYYY-MM-DD") into Gmail
+    after:/before: operators using exact epoch-second boundaries (see
+    _date_to_epoch_seconds) — kept as dedicated, server-computed
+    parameters rather than left for a model to write as raw after:/before:
+    text, since Gmail's YYYY/MM/DD date-string timezone handling is
+    undocumented while epoch seconds are unambiguous."""
     parts = []
-    if intent_args.get("email_sender"):
-        parts.append(f"from:{intent_args['email_sender']}")
-    if intent_args.get("email_subject"):
-        parts.append(f"subject:{intent_args['email_subject']}")
-    if intent_args.get("email_label"):
-        parts.append(f"label:{intent_args['email_label']}")
-    if intent_args.get("after_date"):
-        parts.append(f"after:{_date_to_epoch_seconds(intent_args['after_date'])}")
-    if intent_args.get("before_date"):
-        parts.append(f"before:{_date_to_epoch_seconds(intent_args['before_date'])}")
-    if not parts and unread_only:
-        parts.append("is:unread")
+    if after_date:
+        parts.append(f"after:{_date_to_epoch_seconds(after_date)}")
+    if before_date:
+        parts.append(f"before:{_date_to_epoch_seconds(before_date)}")
     return " ".join(parts)
 
 

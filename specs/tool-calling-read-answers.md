@@ -321,34 +321,32 @@ def answer_question_node(state: RouterState, config: RunnableConfig) -> dict:
         ]
 
     def get_recent_emails(
-        max_results: int = 10,
-        unread_only: bool = False,
-        sender: str | None = None,
-        subject_contains: str | None = None,
+        gmail_query: str = "",
         after_date: str | None = None,
         before_date: str | None = None,
+        max_results: int = 10,
     ) -> list[dict]:
-        """Returns Gmail messages (not Classroom). Use sender/subject_contains
-        when the question names a specific sender or topic; use
-        unread_only=True for "unread"/"new" email questions. Use
-        after_date/before_date (each "YYYY-MM-DD", in the user's own
-        timezone) to scope to a specific day or range instead of guessing
-        from a message's own date field — after_date is inclusive,
-        before_date is exclusive, so "yesterday" is
-        after_date=<yesterday>, before_date=<today>, and "today" is
-        after_date=<today> with before_date left unset. Pass a higher
-        max_results (e.g. 25) whenever after_date/before_date is set, so a
-        busy day isn't silently truncated. Leave all filters unset for a
-        general "recent emails" question. Each item is {"from": str,
-        "subject": str, "date": str, "snippet": str} — the snippet is a
-        short excerpt, not the full body."""
-        query_args = {
-            "email_sender": sender,
-            "email_subject": subject_contains,
-            "after_date": after_date,
-            "before_date": before_date,
-        }
-        query = gmail.build_query(query_args, unread_only=unread_only)
+        """Returns Gmail messages (not Classroom) matching gmail_query,
+        Gmail's own search syntax — the same operators you'd type into the
+        Gmail search bar, e.g. "from:prof@uni.edu", "subject:midterm",
+        "has:attachment", "is:unread", "category:updates",
+        "label:important". Combine multiple operators in one
+        space-separated string (space = AND). Use after_date/before_date
+        (each "YYYY-MM-DD", in the user's own timezone) instead of writing
+        after:/before: yourself inside gmail_query — these are computed
+        exactly server-side, whereas hand-written after:/before: dates are
+        timezone-ambiguous. after_date is inclusive, before_date is
+        exclusive, so "yesterday" is after_date=<yesterday>,
+        before_date=<today>, and "today" is after_date=<today> with
+        before_date left unset. Pass a higher max_results (e.g. 25)
+        whenever after_date/before_date is set or gmail_query is broad, so
+        results aren't silently truncated. Leave gmail_query empty and
+        after_date/before_date unset for a general "recent emails"
+        question. Each item is {"from": str, "subject": str, "date": str,
+        "snippet": str} — the snippet is a short excerpt, not the full
+        body."""
+        date_filter = gmail.build_date_filter(after_date, before_date)
+        query = " ".join(part for part in [gmail_query, date_filter] if part)
         try:
             return gmail.list_messages(gmail_service, query, max_results)
         except HttpError as e:
@@ -374,23 +372,29 @@ def answer_question_node(state: RouterState, config: RunnableConfig) -> dict:
     return {"reply_text": reply_text}
 ```
 
-Note `get_recent_emails` reuses `gmail.build_query`, which expects
-`intent_args`-shaped keys (`email_sender`/`email_subject`) — passing a
-dict with those two keys directly is the minimal-diff way to reuse it
-as-is rather than duplicating query-building logic.
+`get_recent_emails` exposes Gmail's search almost directly: `gmail_query`
+is passed straight through to `messages.list`'s `q` parameter, since
+Gmail's own API is already just one free-text search string (`from:`,
+`subject:`, `has:attachment`, `category:`, `label:`, etc. are all just
+syntax inside that one string, not separate API parameters) — rather than
+us hand-decomposing every operator into its own typed Python parameter
+one at a time, the model writes Gmail query syntax directly, using
+whatever it already knows about Gmail search from training.
 
-`build_query` also accepts `after_date`/`before_date` (each `"YYYY-MM-DD"`)
-and converts each to the Unix timestamp of that date's midnight in
+The one exception is dates: `after_date`/`before_date` (each
+`"YYYY-MM-DD"`) stay as dedicated parameters rather than being left for
+the model to write as raw `after:`/`before:` text. `gmail.build_date_filter`
+converts each to the Unix timestamp of that date's midnight in
 `agent.config.USER_TIMEZONE` (`agent/graph/nodes/gmail.py`'s
 `_date_to_epoch_seconds`) before appending Gmail's `after:`/`before:`
 operators. Gmail's search accepts either a `YYYY/MM/DD` date or a Unix
 timestamp for these operators — the timestamp form is used because the
-day-string form's timezone handling is undocumented, while a computed
-epoch boundary is exact and unambiguous. This — together with injecting
-`datetime.now(USER_TIMEZONE)` instead of UTC as "today" in
-`ANSWER_SYSTEM_PROMPT` — fixes a real bug where, for a user in Pakistan
-(UTC+5), any question asked between midnight and 5am local time computed
-"today" as the previous UTC day.
+day-string form's timezone handling is undocumented (verified empirically
+against the real API), while a computed epoch boundary is exact. This —
+together with injecting `datetime.now(USER_TIMEZONE)` instead of UTC as
+"today" in `ANSWER_SYSTEM_PROMPT` — fixes a real bug where, for a user in
+Pakistan (UTC+5), any question asked between midnight and 5am local time
+computed "today" as the previous UTC day.
 
 ### 4. `agent/graph/router_graph.py` changes
 
@@ -417,7 +421,7 @@ Once nothing routes to them, these become unused and are deleted:
 `agent/scheduler/jobs.py`'s proactive polling, and the new tool functions
 above: `list_courses`, `list_assignments`, `list_announcements`,
 `find_assignment_candidates`, `_due_datetime`, `_is_missing`,
-`list_messages`, `build_query`, `_get_message_metadata`,
+`list_messages`, `_get_message_metadata`,
 `get_current_history_id`, `get_new_message_ids`, `get_messages_by_id`,
 `summarize_emails` (the Gemini digest helper in `llm.py`, still used by
 `poll_gmail_job`'s proactive digest — untouched by this spec).

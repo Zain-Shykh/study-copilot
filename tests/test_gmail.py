@@ -123,26 +123,17 @@ class TestSendMessage:
         assert kwargs["body"]["threadId"] == "t1"
 
 
-class TestBuildQuery:
-    def test_no_filters_and_not_unread_returns_empty_string(self):
-        assert gmail.build_query({}, unread_only=False) == ""
-
-    def test_unread_only_with_no_other_filters(self):
-        assert gmail.build_query({}, unread_only=True) == "is:unread"
-
-    def test_sender_and_subject(self):
-        query = gmail.build_query(
-            {"email_sender": "prof@uni.edu", "email_subject": "midterm"}, unread_only=False
-        )
-        assert query == "from:prof@uni.edu subject:midterm"
+class TestBuildDateFilter:
+    def test_no_dates_returns_empty_string(self):
+        assert gmail.build_date_filter(None, None) == ""
 
     def test_after_date_and_before_date_become_epoch_seconds_in_user_timezone(self):
         # 2026-09-24 00:00:00 and 2026-09-25 00:00:00 in Asia/Karachi (UTC+5)
-        query = gmail.build_query(
-            {"after_date": "2026-09-24", "before_date": "2026-09-25"}, unread_only=False
-        )
+        query = gmail.build_date_filter("2026-09-24", "2026-09-25")
         assert query == "after:1790190000 before:1790276400"
 
     def test_after_date_only(self):
-        query = gmail.build_query({"after_date": "2026-09-25"}, unread_only=False)
-        assert query == "after:1790276400"
+        assert gmail.build_date_filter("2026-09-25", None) == "after:1790276400"
+
+    def test_before_date_only(self):
+        assert gmail.build_date_filter(None, "2026-09-25") == "before:1790276400"

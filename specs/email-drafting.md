@@ -216,12 +216,21 @@ def send_message(
 new args:
 
 ```python
+"email_mode": types.Schema(
+    type="STRING",
+    enum=["reply", "new"],
+    description=(
+        "only for draft_email; whether the user wants to reply to an "
+        "existing email or send a brand new one, based on their wording "
+        "— independent of whether an address is mentioned"
+    ),
+),
 "email_reference": types.Schema(
     type="STRING",
     description=(
-        "only for draft_email; either a literal email address to send a new "
-        "email to, or free text identifying an existing email to reply to "
-        "(e.g. a sender name, subject, or topic)"
+        "only for draft_email; the literal email address to send to/reply "
+        "to, if one was given — leave unset if the user only described who "
+        "without an address"
     ),
 ),
 "email_topic": types.Schema(
@@ -230,18 +239,41 @@ new args:
 ),
 ```
 
+**Updated (post-launch fix):** `email_reference` no longer accepts free
+text identifying an email by sender name/subject/topic — see §6.1's
+rewrite below. `resolve_email_node` originally used `"@" in
+email_reference` to decide reply-vs-new and, when no address was given,
+searched Gmail with the raw free-text reference. Both turned out to be
+real bugs: (1) a phrase like "reply to X@y.com" still names an address,
+so the "@"-based mode inference incorrectly treated an explicit reply
+request as a new email; (2) free-text search for something like "the
+last email" isn't understood by Gmail as "sort by date" — it's a literal
+keyword search that returns Gmail's generic relevance-ranked (and often
+irrelevant) matches, not the actual most recent email. `email_mode` now
+carries the reply/new decision explicitly, and `email_reference` is only
+ever a literal address (or unset).
+
 `CLASSIFY_SYSTEM_PROMPT` gains a new bullet (inserted after
 `work_on_assignment`, before `respond_to_pending`):
 
 ```
 - draft_email: the user wants to reply to an existing email or compose a
   new one (e.g. "reply to the registrar's email about my transcript",
-  "email jane.doe@school.edu about rescheduling"). Extract who/which email
-  into email_reference and what it should say into email_topic (leave
-  email_topic unset if genuinely not given — e.g. "reply to that email
-  from my advisor" with no stated content is still valid). This is the
-  ONLY intent that leads to drafting an email — still just identifies the
-  target/topic at this stage, does not draft or send anything itself.
+  "email jane.doe@school.edu about rescheduling"). Always set email_mode
+  to "reply" or "new" based on the user's own wording ("reply to..." →
+  reply; "email/send/write to..." → new) — never infer this from whether
+  an address happens to be present; "reply to jane.doe@school.edu
+  saying..." is still a reply, not a new email, even though it names an
+  address. Extract email_reference ONLY if a literal email address was
+  given — if the user only described who without an address (a name,
+  role, or description), leave email_reference unset (the address will
+  be asked for separately, never guessed or searched for by name).
+  Extract what it should say into email_topic (leave email_topic unset
+  if genuinely not given — e.g. "reply to that email from my advisor"
+  with no stated content is still valid). This is the ONLY intent that
+  leads to drafting an email — still just identifies the
+  mode/target/topic at this stage, does not draft or send anything
+  itself.
 ```
 
 And the existing `unrecognized` bullet's email carve-out is corrected (it
@@ -375,7 +407,129 @@ comment gains two new kinds documented in §6.
 
 ## 6. `agent/graph/router_graph.py` changes
 
-### 6.1 Resolving an email target — new `resolve_email_node`
+### 6.1 Resolving an email target — `resolve_email_node` (revised)
+
+**Post-launch fix, superseding the original design below.** The original
+version used `"@" in email_reference` to decide reply-vs-new and, when no
+address was given, searched Gmail with the raw free-text reference as a
+query. Both were real bugs (see §4.1's note): an explicit "reply to
+X@y.com" was misrouted to "new" because it named an address, and
+free-text phrases like "the last email" don't mean anything to Gmail's
+search engine — they're searched as literal keywords, returning
+irrelevant relevance-ranked matches instead of the actual most recent
+email.
+
+The revised design: `email_mode` (from classify_intent, §4.1) drives
+reply-vs-new directly, and a real email address is now *required* for
+both modes — no more fuzzy free-text matching by name/subject. Given a
+mode and a real address, "which email to reply to" is answered
+deterministically: search Gmail with `from:<address>` and take the most
+recent match, since Gmail's search results are already returned
+newest-first with no extra sorting needed. Missing info (no valid
+address, or no topic) is asked for one piece at a time and tracked as a
+real `pending_question` (`kind: "awaiting_email_details"`) so the user's
+next reply continues it rather than being reclassified from scratch —
+closing a gap the original design also had (asking "who would you like
+to email?" never tracked that a reply was expected).
+
+```python
+def _load_gmail_service(config: RunnableConfig) -> tuple[object | None, str | None]:
+    """Returns (gmail_service, None) on success, or (None, error_reply_text)
+    if credentials are missing/expired. Returned as a pair rather than
+    relying on isinstance(result, str) to detect an error, since the
+    gmail_service itself could coincidentally be a string (e.g. a test
+    stub)."""
+    pool = config["configurable"]["pool"]
+    with pool.connection() as conn:
+        clients = google_auth.load_google_clients(conn)
+    if isinstance(clients, str):
+        return None, clients
+    gmail_service, _, _ = clients
+    return gmail_service, None
+
+
+def _is_valid_email(text: str) -> bool:
+    return "@" in text and "." in text.split("@")[-1]
+
+
+def _ask_for_email_details(mode: str, address: str | None, topic: str, asking_for: str) -> dict:
+    if asking_for == "address":
+        question = (
+            "Who would you like to reply to — give me their email address?"
+            if mode == "reply"
+            else "Who would you like to email? Give me their email address."
+        )
+    else:
+        question = f"What should the email to {address} say?"
+    return {
+        "reply_text": question,
+        "pending_question": {
+            "kind": "awaiting_email_details",
+            "message_id": None,
+            "mode": mode,
+            "address": address,
+            "topic": topic,
+            "asking_for": asking_for,
+        },
+    }
+
+
+def _resolve_email_target(mode: str, address_text: str, topic: str, gmail_service) -> dict:
+    address = address_text if address_text and _is_valid_email(address_text) else None
+
+    if not address:
+        return _ask_for_email_details(mode, None, topic, "address")
+    if not topic:
+        return _ask_for_email_details(mode, address, topic, "topic")
+
+    if mode == "new":
+        resolved = {
+            "mode": "new",
+            "recipient_email": address,
+            "recipient_display": address,
+            "original_subject": None,
+            "gmail_message_id": None,
+            "gmail_thread_id": None,
+            "gmail_message_id_header": None,
+            "topic": topic,
+        }
+        return _confirm_email_reply(resolved)
+
+    try:
+        matches = gmail.list_messages(gmail_service, f"from:{address}", 1)
+    except HttpError as e:
+        return {"reply_text": f"Couldn't search Gmail right now: {e}", "pending_question": None}
+
+    if not matches:
+        return {
+            "reply_text": f"I couldn't find any emails from {address} to reply to.",
+            "pending_question": None,
+        }
+
+    return _confirm_email_reply(_resolved_from_match(matches[0], topic))
+
+
+async def resolve_email_node(state: RouterState, config: RunnableConfig) -> dict:
+    gmail_service, error = _load_gmail_service(config)
+    if error:
+        return {"reply_text": error}
+
+    intent_args = state.get("intent_args", {})
+    mode = intent_args.get("email_mode") or "new"
+    address_text = (intent_args.get("email_reference") or "").strip()
+    topic = intent_args.get("email_topic", "")
+
+    return _resolve_email_target(mode, address_text, topic, gmail_service)
+```
+
+`_extract_email_address`/`_resolved_from_match`/`_confirm_email_question_text`/
+`_confirm_email_reply` (defined just above `resolve_email_node` in the
+file) are unchanged from the original design below — `_resolved_from_match`
+still needs a `from:` search result and a topic; only what feeds into it
+changed.
+
+<details>
+<summary>Original design (superseded — kept for history)</summary>
 
 Mirrors `resolve_assignment_node`'s shape (resolve → confirm before doing
 anything), but the matching mechanism is different: Gmail's own search
@@ -483,7 +637,40 @@ A "new email, no topic given" reply asks for the content directly (§4.1's
 by falling back to the original email's content — but a genuinely new
 email has nothing else to draft from, so it must be asked for).
 
-### 6.2 `handle_email_disambiguation_node` — new, mirrors `handle_disambiguation_node`
+</details>
+
+### 6.2 `handle_email_details_node` (revised, replaces `handle_email_disambiguation_node`)
+
+**Post-launch fix.** Since `_resolve_email_target` now always resolves a
+reply to a single deterministic `from:`-search result (§6.1), there's no
+longer a multi-candidate case to disambiguate — this node instead handles
+the "awaiting_email_details" continuation: the user answering a follow-up
+that asked for the still-missing address or topic.
+
+```python
+def handle_email_details_node(state: RouterState, config: RunnableConfig) -> dict:
+    pending_question = state["pending_question"]
+    mode = pending_question["mode"]
+    address = pending_question["address"]
+    topic = pending_question["topic"]
+    answer_text = state["inbound_text"].strip()
+
+    if pending_question["asking_for"] == "address":
+        address = answer_text
+    else:
+        topic = answer_text
+
+    gmail_service, error = _load_gmail_service(config)
+    if error:
+        return {"reply_text": error, "pending_question": None}
+
+    return _resolve_email_target(mode, address, topic, gmail_service)
+```
+
+<details>
+<summary>Original design (superseded — kept for history)</summary>
+
+`handle_email_disambiguation_node`, mirrors `handle_disambiguation_node`:
 
 ```python
 def handle_email_disambiguation_node(state: RouterState, config: RunnableConfig) -> dict:
@@ -512,6 +699,8 @@ def handle_email_disambiguation_node(state: RouterState, config: RunnableConfig)
 
     return _confirm_email_reply(_resolved_from_match(candidates[choice - 1], topic))
 ```
+
+</details>
 
 ### 6.3 `run_email_flow` and `resume_email_thread` — new, mirror `run_assignment_flow`/`resume_assignment_thread`
 
@@ -692,10 +881,12 @@ disambiguation) is already generic over `display_name` and needs no change.
 
 ### 6.7 Graph wiring changes
 
-`route_after_entry`'s `pending_question["kind"]` dispatch dict gains:
+`route_after_entry`'s `pending_question["kind"]` dispatch dict gains
+(**revised** — `disambiguate_email` was replaced by
+`awaiting_email_details` per §6.1/§6.2's post-launch fix):
 ```python
 "confirm_draft_email": "handle_email_confirmation",
-"disambiguate_email": "handle_email_disambiguation",
+"awaiting_email_details": "handle_email_details",
 ```
 
 `route_after_classify`'s intent dispatch dict gains:
@@ -705,8 +896,8 @@ disambiguation) is already generic over `display_name` and needs no change.
 
 `build_router_graph` registers three new nodes (`resolve_email` →
 `resolve_email_node`, `handle_email_confirmation` →
-`handle_email_confirmation_node`, `handle_email_disambiguation` →
-`handle_email_disambiguation_node`) and adds each to both the
+`handle_email_confirmation_node`, `handle_email_details` →
+`handle_email_details_node`) and adds each to both the
 `route_after_entry`/`route_after_classify` edge maps and the existing
 "every terminal node routes to send_reply" loop.
 
@@ -1059,7 +1250,7 @@ the existing `"assignment_graph"`:
 | `agent/graph/nodes/gmail.py` | `_get_message_metadata` captures `thread_id`/`message_id_header`; new `get_message_body`, `send_message` (§3) |
 | `agent/llm.py` | `draft_email` intent + args on `classify_intent`; new `draft_email` function (§4) |
 | `agent/graph/state.py` | New `EmailState`; `RouterState` comments updated (§5) |
-| `agent/graph/router_graph.py` | New `resolve_email_node`, `handle_email_disambiguation_node`, `handle_email_confirmation_node`, `run_email_flow`, `resume_email_thread`; `_dispatch_pending_resume` and `resolve_pending_item_node` generalized; graph wiring extended (§6) |
+| `agent/graph/router_graph.py` | New `resolve_email_node`, `handle_email_details_node`, `handle_email_confirmation_node`, `run_email_flow`, `resume_email_thread`; `_dispatch_pending_resume` and `resolve_pending_item_node` generalized; graph wiring extended (§6) |
 | `agent/graph/email_graph.py` | Full implementation, replaces the one-line stub (§7) |
 | `agent/graph/recovery.py` | `scan_for_interrupted_assignments` → `scan_for_interrupted_threads`, now scans both prefixes (§8) |
 | `agent/main.py` | Builds `email_graph`, wires it into crash recovery (§9) |

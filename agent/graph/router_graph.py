@@ -80,8 +80,8 @@ def route_after_entry(state: RouterState) -> str:
         return {
             "disambiguate_assignment": "handle_disambiguation",
             "confirm_start_assignment": "handle_confirmation",
-            "disambiguate_email": "handle_email_disambiguation",
             "confirm_draft_email": "handle_email_confirmation",
+            "awaiting_email_details": "handle_email_details",
             "disambiguate_pending_item": "handle_pending_item_disambiguation",
         }[pending_question["kind"]]
     if state.get("matched_pending_item") is not None:
@@ -233,38 +233,78 @@ def _confirm_email_reply(resolved: dict) -> dict:
     }
 
 
-async def resolve_email_node(state: RouterState, config: RunnableConfig) -> dict:
-    """Resolves the draft_email intent's free-text target into either a new
-    recipient address or a specific email to reply to, then asks for
-    confirmation before drafting anything. Unlike resolve_assignment_node,
-    matching against existing emails uses Gmail's own search rather than
-    local fuzzy scoring — see spec §6.1."""
+def _load_gmail_service(config: RunnableConfig) -> tuple[object | None, str | None]:
+    """Returns (gmail_service, None) on success, or (None, error_reply_text)
+    if credentials are missing/expired. Returned as a pair rather than
+    relying on isinstance(result, str) to detect an error, since the
+    gmail_service itself could coincidentally be a string (e.g. a test
+    stub) — this codebase's usual google_auth.load_google_clients callers
+    check isinstance on the raw tuple-or-string return before unpacking,
+    never on an already-unpacked single value. No actual async I/O
+    despite being usable from an async node — plain sync helper, callable
+    from either."""
     pool = config["configurable"]["pool"]
     with pool.connection() as conn:
         clients = google_auth.load_google_clients(conn)
     if isinstance(clients, str):
-        return {"reply_text": clients}
+        return None, clients
     gmail_service, _, _ = clients
+    return gmail_service, None
 
-    target_text = state.get("intent_args", {}).get("email_reference", "").strip()
-    topic = state.get("intent_args", {}).get("email_topic", "")
 
-    if not target_text:
-        return {
-            "reply_text": "Who would you like to email, or which email are you replying to?",
-            "pending_question": None,
-        }
+def _is_valid_email(text: str) -> bool:
+    return "@" in text and "." in text.split("@")[-1]
 
-    if "@" in target_text:
-        if not topic:
-            return {
-                "reply_text": f"What should the email to {target_text} say?",
-                "pending_question": None,
-            }
+
+def _ask_for_email_details(mode: str, address: str | None, topic: str, asking_for: str) -> dict:
+    if asking_for == "address":
+        question = (
+            "Who would you like to reply to — give me their email address?"
+            if mode == "reply"
+            else "Who would you like to email? Give me their email address."
+        )
+    else:
+        question = f"What should the email to {address} say?"
+    return {
+        "reply_text": question,
+        "pending_question": {
+            "kind": "awaiting_email_details",
+            "message_id": None,
+            "mode": mode,
+            "address": address,
+            "topic": topic,
+            "asking_for": asking_for,
+        },
+    }
+
+
+def _resolve_email_target(mode: str, address_text: str, topic: str, gmail_service) -> dict:
+    """Core resolution once mode/address/topic are known (or partially
+    known) — asks for whatever's still missing as a tracked
+    pending_question (so the next reply continues it rather than being
+    misclassified from scratch, see route_after_entry), otherwise
+    resolves straight to a confirmation.
+
+    A reply requires a real address just like a new email — no more
+    fuzzy free-text search across the whole mailbox by name/subject,
+    since that could silently match an unrelated email (Gmail's generic
+    relevance ranking, not a "did this actually mean what the user
+    meant" check). Once we have an address, from: is exact and
+    deterministic, and Gmail returns results newest-first by default, so
+    "the email from X" unambiguously means the most recent one from X.
+    See spec §6.1."""
+    address = address_text if address_text and _is_valid_email(address_text) else None
+
+    if not address:
+        return _ask_for_email_details(mode, None, topic, "address")
+    if not topic:
+        return _ask_for_email_details(mode, address, topic, "topic")
+
+    if mode == "new":
         resolved = {
             "mode": "new",
-            "recipient_email": target_text,
-            "recipient_display": target_text,
+            "recipient_email": address,
+            "recipient_display": address,
             "original_subject": None,
             "gmail_message_id": None,
             "gmail_thread_id": None,
@@ -274,31 +314,55 @@ async def resolve_email_node(state: RouterState, config: RunnableConfig) -> dict
         return _confirm_email_reply(resolved)
 
     try:
-        matches = gmail.list_messages(gmail_service, target_text, 5)
+        matches = gmail.list_messages(gmail_service, f"from:{address}", 1)
     except HttpError as e:
-        return {"reply_text": f"Couldn't search Gmail right now: {e}"}
+        return {"reply_text": f"Couldn't search Gmail right now: {e}", "pending_question": None}
 
     if not matches:
         return {
-            "reply_text": (
-                f'I couldn\'t find an email matching "{target_text}" — if you want to '
-                "email someone new, give me their email address directly."
-            ),
+            "reply_text": f"I couldn't find any emails from {address} to reply to.",
             "pending_question": None,
         }
-    if len(matches) == 1:
-        return _confirm_email_reply(_resolved_from_match(matches[0], topic))
 
-    lines = [f'{i + 1}. From {m["from"]} — "{m["subject"]}" ({m["date"]})' for i, m in enumerate(matches)]
-    return {
-        "reply_text": "Which email did you mean?\n" + "\n".join(lines),
-        "pending_question": {
-            "kind": "disambiguate_email",
-            "message_id": None,
-            "candidates": matches,
-            "topic": topic,
-        },
-    }
+    return _confirm_email_reply(_resolved_from_match(matches[0], topic))
+
+
+async def resolve_email_node(state: RouterState, config: RunnableConfig) -> dict:
+    """Resolves the draft_email intent into a mode/address/topic, asking
+    for whatever's missing, then confirming before drafting anything —
+    see spec §6.1."""
+    gmail_service, error = _load_gmail_service(config)
+    if error:
+        return {"reply_text": error}
+
+    intent_args = state.get("intent_args", {})
+    mode = intent_args.get("email_mode") or "new"
+    address_text = (intent_args.get("email_reference") or "").strip()
+    topic = intent_args.get("email_topic", "")
+
+    return _resolve_email_target(mode, address_text, topic, gmail_service)
+
+
+def handle_email_details_node(state: RouterState, config: RunnableConfig) -> dict:
+    """pending_question["kind"] == "awaiting_email_details" — the user is
+    answering a follow-up asking for the still-missing address or
+    topic."""
+    pending_question = state["pending_question"]
+    mode = pending_question["mode"]
+    address = pending_question["address"]
+    topic = pending_question["topic"]
+    answer_text = state["inbound_text"].strip()
+
+    if pending_question["asking_for"] == "address":
+        address = answer_text
+    else:
+        topic = answer_text
+
+    gmail_service, error = _load_gmail_service(config)
+    if error:
+        return {"reply_text": error, "pending_question": None}
+
+    return _resolve_email_target(mode, address, topic, gmail_service)
 
 
 def _log_if_failed(task: "asyncio.Task") -> None:
@@ -739,34 +803,6 @@ def handle_disambiguation_node(state: RouterState, config: RunnableConfig) -> di
     return _confirm_reply(candidates[choice - 1])
 
 
-def handle_email_disambiguation_node(state: RouterState, config: RunnableConfig) -> dict:
-    """pending_question["kind"] == "disambiguate_email"."""
-    configurable = config["configurable"]
-    pending_question = state["pending_question"]
-    candidates = pending_question["candidates"]
-    topic = pending_question["topic"]
-    lines = [f'{i + 1}. From {c["from"]} — "{c["subject"]}" ({c["date"]})' for i, c in enumerate(candidates)]
-
-    try:
-        choice = llm.resolve_disambiguation(
-            configurable["genai_client"], configurable["gemini_model"], lines, state["inbound_text"]
-        )
-    except Exception:
-        logger.exception("resolve_disambiguation failed after retries")
-        return {
-            "reply_text": "Couldn't process that reply right now — please try again.",
-            "pending_question": None,
-        }
-
-    if choice < 1 or choice > len(candidates):
-        return {
-            "reply_text": "Sorry, I couldn't tell which one you meant — try naming it differently.",
-            "pending_question": None,
-        }
-
-    return _confirm_email_reply(_resolved_from_match(candidates[choice - 1], topic))
-
-
 async def handle_pending_item_disambiguation_node(state: RouterState, config: RunnableConfig) -> dict:
     """pending_question["kind"] == "disambiguate_pending_item"."""
     configurable = config["configurable"]
@@ -837,7 +873,7 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
     g.add_node("handle_confirmation", handle_confirmation_node)
     g.add_node("handle_disambiguation", handle_disambiguation_node)
     g.add_node("handle_email_confirmation", handle_email_confirmation_node)
-    g.add_node("handle_email_disambiguation", handle_email_disambiguation_node)
+    g.add_node("handle_email_details", handle_email_details_node)
     g.add_node("handle_pending_item_reply", handle_pending_item_reply)
     g.add_node("handle_pending_item_disambiguation", handle_pending_item_disambiguation_node)
     g.add_node("answer_question_node", answer_question_node)
@@ -853,7 +889,7 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
             "handle_confirmation": "handle_confirmation",
             "handle_disambiguation": "handle_disambiguation",
             "handle_email_confirmation": "handle_email_confirmation",
-            "handle_email_disambiguation": "handle_email_disambiguation",
+            "handle_email_details": "handle_email_details",
             "handle_pending_item_disambiguation": "handle_pending_item_disambiguation",
             "handle_pending_item_reply": "handle_pending_item_reply",
         },
@@ -879,7 +915,7 @@ def build_router_graph(checkpointer) -> CompiledStateGraph:
         "handle_confirmation",
         "handle_disambiguation",
         "handle_email_confirmation",
-        "handle_email_disambiguation",
+        "handle_email_details",
         "handle_pending_item_reply",
         "handle_pending_item_disambiguation",
     ):

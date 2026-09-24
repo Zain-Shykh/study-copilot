@@ -39,12 +39,21 @@ calling route_message. Categories:
   meant at this stage, does not draft anything itself.
 - draft_email: the user wants to reply to an existing email or compose a
   new one (e.g. "reply to the registrar's email about my transcript",
-  "email jane.doe@school.edu about rescheduling"). Extract who/which email
-  into email_reference and what it should say into email_topic (leave
-  email_topic unset if genuinely not given — e.g. "reply to that email
-  from my advisor" with no stated content is still valid). This is the
-  ONLY intent that leads to drafting an email — still just identifies the
-  target/topic at this stage, does not draft or send anything itself.
+  "email jane.doe@school.edu about rescheduling"). Always set email_mode
+  to "reply" or "new" based on the user's own wording ("reply to..." →
+  reply; "email/send/write to..." → new) — never infer this from whether
+  an address happens to be present; "reply to jane.doe@school.edu
+  saying..." is still a reply, not a new email, even though it names an
+  address. Extract email_reference ONLY if a literal email address was
+  given — if the user only described who without an address (a name,
+  role, or description), leave email_reference unset (the address will
+  be asked for separately, never guessed or searched for by name).
+  Extract what it should say into email_topic (leave email_topic unset
+  if genuinely not given — e.g. "reply to that email from my advisor"
+  with no stated content is still valid). This is the ONLY intent that
+  leads to drafting an email — still just identifies the
+  mode/target/topic at this stage, does not draft or send anything
+  itself.
 - respond_to_pending: the user is making a decision about a draft or
   pending item they were previously shown — approving it, asking for
   changes, rejecting it, or answering a submit yes/no question — whether
@@ -81,12 +90,21 @@ ROUTE_MESSAGE_DECLARATION = types.FunctionDeclaration(
                 type="STRING",
                 description="only for work_on_assignment; the free-text name/description the user gave",
             ),
+            "email_mode": types.Schema(
+                type="STRING",
+                enum=["reply", "new"],
+                description=(
+                    "only for draft_email; whether the user wants to reply to an "
+                    "existing email or send a brand new one, based on their wording "
+                    "— independent of whether an address is mentioned"
+                ),
+            ),
             "email_reference": types.Schema(
                 type="STRING",
                 description=(
-                    "only for draft_email; either a literal email address to send a new "
-                    "email to, or free text identifying an existing email to reply to "
-                    "(e.g. a sender name, subject, or topic)"
+                    "only for draft_email; the literal email address to send to/reply "
+                    "to, if one was given — leave unset if the user only described who "
+                    "without an address"
                 ),
             ),
             "email_topic": types.Schema(

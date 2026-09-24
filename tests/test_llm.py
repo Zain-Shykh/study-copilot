@@ -196,6 +196,29 @@ class TestAnswerQuestion:
         _, kwargs = client.models.generate_content.call_args
         assert "2026-09-17" in kwargs["config"].system_instruction
 
+    def test_today_uses_pakistan_time_not_utc(self, monkeypatch):
+        """Regression test: "today" used to be computed in UTC, so any
+        time between midnight and 5am Pakistan time landed on the
+        previous UTC day - the model would say "today" is yesterday and
+        "yesterday" is two days ago."""
+
+        # 12:08 AM on 2026-09-25 in Pakistan (UTC+5) is 2026-09-24 19:08 UTC.
+        fixed_instant = datetime(2026, 9, 24, 19, 8, 0, tzinfo=timezone.utc)
+
+        class _FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed_instant.astimezone(tz) if tz else fixed_instant
+
+        monkeypatch.setattr(llm, "datetime", _FixedDatetime)
+        client = MagicMock()
+        client.models.generate_content.return_value = _response_with_text("ok")
+
+        llm.answer_question(client, "gemini-x", "what emails came in today?", tools=[])
+
+        _, kwargs = client.models.generate_content.call_args
+        assert "2026-09-25" in kwargs["config"].system_instruction
+
     def test_raises_runtime_error_on_empty_text(self):
         client = MagicMock()
         client.models.generate_content.return_value = _response_with_text("")

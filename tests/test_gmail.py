@@ -121,3 +121,19 @@ class TestSendMessage:
         assert mime["References"] == "<orig@mail.gmail.com>"
         _, kwargs = service.users.return_value.messages.return_value.send.call_args
         assert kwargs["body"]["threadId"] == "t1"
+
+
+class TestBuildDateFilter:
+    def test_no_dates_returns_empty_string(self):
+        assert gmail.build_date_filter(None, None) == ""
+
+    def test_after_date_and_before_date_become_epoch_seconds_in_user_timezone(self):
+        # 2026-09-24 00:00:00 and 2026-09-25 00:00:00 in Asia/Karachi (UTC+5)
+        query = gmail.build_date_filter("2026-09-24", "2026-09-25")
+        assert query == "after:1790190000 before:1790276400"
+
+    def test_after_date_only(self):
+        assert gmail.build_date_filter("2026-09-25", None) == "after:1790276400"
+
+    def test_before_date_only(self):
+        assert gmail.build_date_filter(None, "2026-09-25") == "before:1790276400"

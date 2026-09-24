@@ -2,10 +2,16 @@
 
 import os
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 import dotenv
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
+
+# Single-user app — the user is in Pakistan. Used wherever "today"/"yesterday"
+# or a calendar-day boundary needs to match the user's actual local day
+# rather than UTC.
+USER_TIMEZONE = ZoneInfo("Asia/Karachi")
 
 _REQUIRED_ENV_VARS = [
     "DATABASE_URL",

@@ -145,6 +145,16 @@ one process.
 Then message your WhatsApp test number from `MY_WHATSAPP_NUMBER` (e.g.
 "what's due this week?") to confirm it responds.
 
+## Observability (optional)
+
+Set `LANGSMITH_TRACING_V2=true`, `LANGSMITH_API_KEY`, and `LANGSMITH_PROJECT`
+in `.env` (get an API key at smith.langchain.com) to send traces to
+LangSmith. Graph-level tracing (node execution order, full state at each
+step) is automatic — no code changes needed. Every Gemini call in
+`agent/llm.py` is also wrapped with `@traceable`, so each shows up as its
+own span with the exact prompt and response. Traces go to LangSmith's
+cloud, so only enable this with data you're okay leaving your machine.
+
 ## Verifying Phase 0 infrastructure
 
 Throwaway scripts in `scripts/` (not imported by `agent/`, disposable) check

@@ -494,24 +494,28 @@ so every downstream node works off `submission_files`/`manifest` instead.
   but its output shape changes per §4: reads back `submission_files`,
   `manifest`, `summary_text`, `session_id` from `run_claude_code`'s result
   instead of a single `draft_path`.
-- **`relay_node`** — sends every file in `state["submission_files"]` as its
-  own WhatsApp document (looping `send_whatsapp_document`, reusing Phase
-  2's helper as-is — no format conversion or zipping for review purposes,
-  you always review the raw files/folders Claude Code actually wrote,
-  never a packaged version, so each one is individually readable). Each
-  document is sent using its relative path under `submission/` with `/`
-  replaced by `__` as the filename shown (e.g. `submission/src/main.py` →
-  `src__main.py`) — WhatsApp document names are flat strings, and this
-  keeps files from same-named siblings in different subfolders (e.g. two
-  `utils.py` under `src/` and `tests/`) distinguishable instead of
-  colliding. Followed by one text message with the summary plus review
-  instructions ("Reply approve, suggest changes, or say reject."). After a
-  *successful* send it
-  inserts a `pending_items` row (`item_type="assignment"`,
-  `display_name=f"{course_name} — {title}"`, keyed on that summary
-  message's id) via `repo.create_pending_item`. On failure (ingest or
-  draft error) it behaves exactly as in Phase 2 — sends `failure_text`,
-  nothing else.
+- **`relay_node`** — **revised (post-launch fix):** no longer sends the
+  submission files as WhatsApp documents. It instead uploads every file in
+  `state["submission_files"]` to the user's Drive (raw, as Claude Code
+  wrote them — no format conversion or zipping for review purposes, reusing
+  `_upload_to_drive`, the same helper `submission_prep_node` uses for the
+  final packaged upload) and sends one text message: the summary, then one
+  `"<relative path under submission/>: <Drive webViewLink>"` line per file,
+  then the review instructions ("Reply approve, suggest changes, or say
+  reject."). This replaced an earlier design that sent every file as its
+  own WhatsApp document, individually readable inline — switched because
+  the user wanted review to happen via Drive links instead of inline
+  document attachments. Loading the Drive client reuses
+  `google_auth.load_google_clients` (same pattern as `ingest_node`/
+  `submission_prep_node`); an auth failure or an upload error (any
+  exception from `_upload_to_drive`) is logged and the node returns `{}`
+  without sending anything further — same swallow-and-log shape Phase 2
+  already used for a WhatsApp send failure, not a new failure mode. After a
+  *successful* summary send it inserts a `pending_items` row
+  (`item_type="assignment"`, `display_name=f"{course_name} — {title}"`,
+  keyed on that summary message's id) via `repo.create_pending_item`. On
+  failure (ingest or draft error) it behaves exactly as in Phase 2 — sends
+  `failure_text`, nothing else.
 - **`route_after_relay(state)`** — new: `"await_review_node"` if there's no
   `failure_text`, else `END`.
 - **`await_review_node`** (new, sync):
@@ -860,7 +864,7 @@ acceptance criteria (per Decision #8, not in the original plan text):
 | `agent/db/repo.py` | Add `get_claude_session`, `create_pending_item`, `get_pending_item`, `list_pending_items`, `close_pending_item` |
 | `agent/llm.py` | Add `respond_to_pending` intent + `pending_item_reference` arg; add `REVIEW_DECLARATION`/`parse_review_reply` |
 | `agent/graph/nodes/claude_code.py` | `run_claude_code` gains `resume_session_id`/`feedback` params, `REVISE_PROMPT_TEMPLATE`; **`DRAFT_PROMPT` rewritten** and the success check changed to require `submission/` + a valid `submission_manifest.json` instead of `draft.md` (Decision #8 — revises Phase 2 behavior) |
-| `agent/graph/assignment_graph.py` | Add `revise_node`, `await_review_node`, `parse_review_node`, `ask_submit_node`, `await_submit_node`, `parse_submit_node`, `submission_prep_node`, `relay_submit_node`; extend `AssignmentState` (`submission_files`/`manifest`/`final_files`/`drive_links` replace `draft_path`/`final_docx_path`/`drive_link`); `relay_node` now sends N documents instead of one; `submission_prep_node` branches on the manifest's format (zip via stdlib `zipfile`, pdf/docx via Pandoc, as-is direct upload) instead of a fixed Pandoc-to-docx call |
+| `agent/graph/assignment_graph.py` | Add `revise_node`, `await_review_node`, `parse_review_node`, `ask_submit_node`, `await_submit_node`, `parse_submit_node`, `submission_prep_node`, `relay_submit_node`; extend `AssignmentState` (`submission_files`/`manifest`/`final_files`/`drive_links` replace `draft_path`/`final_docx_path`/`drive_link`); `relay_node` now sends N documents instead of one; `submission_prep_node` branches on the manifest's format (zip via stdlib `zipfile`, pdf/docx via Pandoc, as-is direct upload) instead of a fixed Pandoc-to-docx call. **Post-launch fix**: `relay_node` no longer sends WhatsApp documents — it uploads each submission file to Drive (via the existing `_upload_to_drive` helper) and sends their links in the summary text instead |
 | `agent/graph/router_graph.py` | Add `_find_targeted_pending_item`, `handle_pending_item_reply`, `resolve_pending_item_node`, `handle_pending_item_disambiguation_node`; extend `route_entry_node`/`route_after_entry`/`route_after_classify`; guard `send_reply_node` against an absent `reply_text` |
 | `agent/graph/state.py` | Document the third `pending_question["kind"]` value (no new fields) |
 | `agent/graph/recovery.py` | New — `scan_for_interrupted_assignments` |

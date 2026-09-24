@@ -279,10 +279,26 @@ class TestGetRecentEmails:
         )
         assert result == [{"from": "prof@uni.edu", "subject": "Midterm", "date": "", "snippet": ""}]
         build_query_mock.assert_called_once_with(
-            {"email_sender": "prof@uni.edu", "email_subject": "midterm"}, unread_only=True
+            {"email_sender": "prof@uni.edu", "email_subject": "midterm", "after_date": None, "before_date": None},
+            unread_only=True,
         )
         list_messages_mock.assert_called_once_with(
             list_messages_mock.call_args[0][0], "from:prof@uni.edu subject:midterm", 5
+        )
+
+    def test_forwards_date_range(self, monkeypatch):
+        _stub_clients(monkeypatch)
+        captured = _capture_tools(monkeypatch)
+        build_query_mock = MagicMock(return_value="after:1758657000 before:1758743400")
+        monkeypatch.setattr(gmail, "build_query", build_query_mock)
+        monkeypatch.setattr(gmail, "list_messages", MagicMock(return_value=[]))
+
+        aq_module.answer_question_node({"inbound_text": "emails from yesterday"}, _make_config())
+
+        captured["tools"]["get_recent_emails"](after_date="2026-09-24", before_date="2026-09-25")
+        build_query_mock.assert_called_once_with(
+            {"email_sender": None, "email_subject": None, "after_date": "2026-09-24", "before_date": "2026-09-25"},
+            unread_only=False,
         )
 
     def test_defaults_unset_filters_to_none(self, monkeypatch):
@@ -295,7 +311,9 @@ class TestGetRecentEmails:
         aq_module.answer_question_node({"inbound_text": "recent emails"}, _make_config())
 
         captured["tools"]["get_recent_emails"]()
-        build_query_mock.assert_called_once_with({"email_sender": None, "email_subject": None}, unread_only=False)
+        build_query_mock.assert_called_once_with(
+            {"email_sender": None, "email_subject": None, "after_date": None, "before_date": None}, unread_only=False
+        )
 
     def test_http_error_returns_error_payload(self, monkeypatch):
         _stub_clients(monkeypatch)

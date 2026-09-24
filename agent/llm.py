@@ -3,11 +3,13 @@ and email summarization."""
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Callable
 
 from google import genai
 from google.genai import types
+
+from agent.config import USER_TIMEZONE
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +111,10 @@ a short, direct reply. Rules:
 - For any relative-time question ("due soon", "next 2 weeks", "overdue",
   "today"), compute the window from the actual date given to you above —
   never guess or assume what today's date is.
+- For any date-scoped email question ("yesterday", "today", "on <date>",
+  "last week"), call get_recent_emails with after_date/before_date
+  computed from the actual date given to you above — never decide which
+  day an email falls on yourself by reading its raw date field.
 - Keep the reply concise and in plain text formatted for WhatsApp — short
   lines, no markdown headers, no asterisk bullets (use "-").
 """
@@ -128,8 +134,8 @@ def answer_question(
     question. Raises after 3 failed attempts (network/5xx/429, via
     _with_retry) or RuntimeError if the model exhausts max_remote_calls
     without producing a final text answer."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    system_instruction = f"Today's date is {today} (UTC).\n\n{ANSWER_SYSTEM_PROMPT}"
+    today = datetime.now(USER_TIMEZONE).strftime("%Y-%m-%d")
+    system_instruction = f"Today's date is {today} (Pakistan Standard Time).\n\n{ANSWER_SYSTEM_PROMPT}"
 
     def call(model):
         return client.models.generate_content(

@@ -1,9 +1,12 @@
 """Gmail API calls: read/search/summarize, draft, send."""
 
 import base64
+from datetime import datetime
 from email.mime.text import MIMEText
 
 from googleapiclient.errors import HttpError
+
+from agent.config import USER_TIMEZONE
 
 
 def _get_message_metadata(gmail_service, message_id: str) -> dict:
@@ -83,6 +86,17 @@ def get_messages_by_id(gmail_service, message_ids: list[str]) -> list[dict]:
     return [_get_message_metadata(gmail_service, mid) for mid in message_ids]
 
 
+def _date_to_epoch_seconds(date_str: str) -> int:
+    """Converts a "YYYY-MM-DD" calendar date to the Unix timestamp of that
+    date's midnight in USER_TIMEZONE. Gmail's after:/before: search
+    operators accept either a YYYY/MM/DD date (whose timezone handling is
+    undocumented) or a Unix timestamp (exact, timezone-unambiguous) — we
+    use the latter so a "day" always means a day in the user's own
+    timezone, not wherever Gmail's servers assume."""
+    local_midnight = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=USER_TIMEZONE)
+    return int(local_midnight.timestamp())
+
+
 def build_query(intent_args: dict, unread_only: bool) -> str:
     parts = []
     if intent_args.get("email_sender"):
@@ -91,6 +105,10 @@ def build_query(intent_args: dict, unread_only: bool) -> str:
         parts.append(f"subject:{intent_args['email_subject']}")
     if intent_args.get("email_label"):
         parts.append(f"label:{intent_args['email_label']}")
+    if intent_args.get("after_date"):
+        parts.append(f"after:{_date_to_epoch_seconds(intent_args['after_date'])}")
+    if intent_args.get("before_date"):
+        parts.append(f"before:{_date_to_epoch_seconds(intent_args['before_date'])}")
     if not parts and unread_only:
         parts.append("is:unread")
     return " ".join(parts)

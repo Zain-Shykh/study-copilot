@@ -325,16 +325,28 @@ def answer_question_node(state: RouterState, config: RunnableConfig) -> dict:
         unread_only: bool = False,
         sender: str | None = None,
         subject_contains: str | None = None,
+        after_date: str | None = None,
+        before_date: str | None = None,
     ) -> list[dict]:
         """Returns Gmail messages (not Classroom). Use sender/subject_contains
         when the question names a specific sender or topic; use
-        unread_only=True for "unread"/"new" email questions. Leave all
-        filters unset for a general "recent emails" question. Each item is
-        {"from": str, "subject": str, "date": str, "snippet": str} — the
-        snippet is a short excerpt, not the full body."""
+        unread_only=True for "unread"/"new" email questions. Use
+        after_date/before_date (each "YYYY-MM-DD", in the user's own
+        timezone) to scope to a specific day or range instead of guessing
+        from a message's own date field — after_date is inclusive,
+        before_date is exclusive, so "yesterday" is
+        after_date=<yesterday>, before_date=<today>, and "today" is
+        after_date=<today> with before_date left unset. Pass a higher
+        max_results (e.g. 25) whenever after_date/before_date is set, so a
+        busy day isn't silently truncated. Leave all filters unset for a
+        general "recent emails" question. Each item is {"from": str,
+        "subject": str, "date": str, "snippet": str} — the snippet is a
+        short excerpt, not the full body."""
         query_args = {
             "email_sender": sender,
             "email_subject": subject_contains,
+            "after_date": after_date,
+            "before_date": before_date,
         }
         query = gmail.build_query(query_args, unread_only=unread_only)
         try:
@@ -366,6 +378,19 @@ Note `get_recent_emails` reuses `gmail.build_query`, which expects
 `intent_args`-shaped keys (`email_sender`/`email_subject`) — passing a
 dict with those two keys directly is the minimal-diff way to reuse it
 as-is rather than duplicating query-building logic.
+
+`build_query` also accepts `after_date`/`before_date` (each `"YYYY-MM-DD"`)
+and converts each to the Unix timestamp of that date's midnight in
+`agent.config.USER_TIMEZONE` (`agent/graph/nodes/gmail.py`'s
+`_date_to_epoch_seconds`) before appending Gmail's `after:`/`before:`
+operators. Gmail's search accepts either a `YYYY/MM/DD` date or a Unix
+timestamp for these operators — the timestamp form is used because the
+day-string form's timezone handling is undocumented, while a computed
+epoch boundary is exact and unambiguous. This — together with injecting
+`datetime.now(USER_TIMEZONE)` instead of UTC as "today" in
+`ANSWER_SYSTEM_PROMPT` — fixes a real bug where, for a user in Pakistan
+(UTC+5), any question asked between midnight and 5am local time computed
+"today" as the previous UTC day.
 
 ### 4. `agent/graph/router_graph.py` changes
 

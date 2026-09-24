@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 *.egg-info/
 scripts/.google_token.json
+.claude/worktrees/

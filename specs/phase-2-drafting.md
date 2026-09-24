@@ -186,6 +186,7 @@ PANDOC_CONVERTIBLE_MIMETYPES = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation", # .pptx
 }
 PASSTHROUGH_PREFIXES = ("application/pdf", "image/")
+ZIP_MIMETYPES = {"application/zip", "application/x-zip-compressed"}  # post-launch fix — see below
 
 def resolve_attachment(drive_service, drive_file_id: str, dest_dir: Path) -> Path | None:
     """Fetches file metadata (name, mimeType) via drive.files().get(fileId=...).
@@ -198,11 +199,27 @@ def resolve_attachment(drive_service, drive_file_id: str, dest_dir: Path) -> Pat
         pypandoc.convert_file(tmp_path, "md", outputfile=dest_dir/<name>.md).
       - mimeType startswith PASSTHROUGH_PREFIXES: get_media(...) written as-is
         to dest_dir/<original filename>.
+      - mimeType in ZIP_MIMETYPES: get_media(...) into memory, extracted with
+        stdlib zipfile into dest_dir/<slugified name-without-.zip>/, preserving
+        the archive's internal structure. Returns that directory (not a file).
+        A helper, `_safe_extract`, rejects (raises ValueError) any archive
+        member whose resolved path would land outside the target directory
+        ("zip slip") before extracting anything.
       - anything else: returns None (caller treats as "unsupported, note in
         summary, not a failure" per §0.1).
-    Raises on any Drive HttpError or Pandoc conversion error — caller (ingestion.py)
-    catches this to trigger the fail-fast abort path, since these ARE real
-    failures of an attachment Classroom did mark as a real file."""
+    Raises on any Drive HttpError, Pandoc conversion error, or unsafe zip
+    entry — caller (ingestion.py) catches this to trigger the fail-fast abort
+    path, since these ARE real failures of an attachment Classroom did mark
+    as a real file.
+
+    **Post-launch fix**: `.zip` attachments were originally unhandled (fell
+    through to `None`, silently marked "unsupported"). Live testing found a
+    real assignment whose actual skeleton code was a `.zip` attachment —
+    Claude Code drafted from just the task brief + a PDF, missing the
+    skeleton entirely, and (separately, see §8's post-launch fix) stalled on
+    an `Edit` permission prompt while trying to reconstruct it from memory.
+    Since ingestion reported this as a non-fatal "unsupported" skip rather
+    than a failure, `draft_node` still ran anyway."""
 ```
 
 ---

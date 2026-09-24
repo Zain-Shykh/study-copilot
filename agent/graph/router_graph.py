@@ -380,6 +380,7 @@ async def run_assignment_flow(
     whatsapp_access_token: str,
     whatsapp_phone_number_id: str,
     pool,
+    student_info: str = "",
 ) -> None:
     """Runs the ingest -> draft -> save-session -> relay pipeline for one
     assignment as a single sequential graph invocation. `relay_node` (the
@@ -403,6 +404,7 @@ async def run_assignment_flow(
                     "pool": pool,
                     "whatsapp_access_token": whatsapp_access_token,
                     "whatsapp_phone_number_id": whatsapp_phone_number_id,
+                    "student_info": student_info,
                 }
             },
         )
@@ -720,6 +722,7 @@ async def handle_confirmation_node(state: RouterState, config: RunnableConfig) -
                 configurable["whatsapp_access_token"],
                 configurable["whatsapp_phone_number_id"],
                 configurable["pool"],
+                configurable.get("student_info", ""),
             )
         )
         background_tasks = configurable["background_tasks"]

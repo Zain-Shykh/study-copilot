@@ -28,6 +28,7 @@ def _build_app() -> FastAPI:
         gemini_model="gemini-x",
         meta_whatsapp_access_token="token",
         meta_whatsapp_phone_number_id="phone123",
+        student_info="",
     )
     app.state.pool = MagicMock()
     app.state.graph = MagicMock()

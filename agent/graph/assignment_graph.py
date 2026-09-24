@@ -75,7 +75,8 @@ def route_after_ingest(state: AssignmentState) -> str:
 
 async def draft_node(state: AssignmentState, config: RunnableConfig) -> dict:
     dest_dir = paths.assignment_dir(state["course_name"], state["title"])
-    result = await claude_code.run_claude_code(dest_dir)
+    student_info = config["configurable"].get("student_info", "")
+    result = await claude_code.run_claude_code(dest_dir, student_info=student_info)
 
     if not result["success"]:
         return {"failure_text": f'Drafting "{state["title"]}" failed: {result["error"]}'}
@@ -280,15 +281,21 @@ def route_after_submit(state: AssignmentState) -> str:
 
 def _package_submission(manifest: dict, submission_dir: Path, dest_dir: Path, title: str) -> list[Path]:
     """Mechanically executes manifest exactly as declared by Claude Code —
-    no interpretation of the assignment's own guidelines happens here."""
+    no interpretation of the assignment's own guidelines happens here.
+    manifest's optional "output_name" (e.g. a roll number the assignment
+    asked for) overrides the assignment-title-derived default name for a
+    packaged "zip"/"pdf"/"docx" output; it's ignored for "as-is", where
+    each file already keeps the name Claude Code gave it."""
     format_ = manifest["format"]
     files = manifest["files"]
+    output_name = manifest.get("output_name")
+    base_name = paths.slugify(output_name) if output_name else paths.slugify(title)
 
     if format_ == "as-is":
         return [submission_dir / rel_path for rel_path in files]
 
     if format_ == "zip":
-        zip_path = dest_dir / f"{paths.slugify(title)}.zip"
+        zip_path = dest_dir / f"{base_name}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for rel_path in files:
                 zf.write(submission_dir / rel_path, arcname=rel_path)
@@ -296,10 +303,13 @@ def _package_submission(manifest: dict, submission_dir: Path, dest_dir: Path, ti
 
     # "pdf" / "docx" — flat files only, enforced by claude_code.py's manifest validation
     extra_args = ["--pdf-engine=wkhtmltopdf"] if format_ == "pdf" else []
+    # output_name only unambiguously applies when there's a single output file
+    single_named = bool(output_name) and len(files) == 1
     outputs = []
     for rel_path in files:
         src = submission_dir / rel_path
-        out_path = dest_dir / f"{Path(rel_path).stem}.{format_}"
+        stem = base_name if single_named else Path(rel_path).stem
+        out_path = dest_dir / f"{stem}.{format_}"
         pypandoc.convert_file(str(src), format_, outputfile=str(out_path), extra_args=extra_args)
         outputs.append(out_path)
     return outputs

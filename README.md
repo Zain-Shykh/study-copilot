@@ -84,9 +84,10 @@ sudo -u postgres createdb local_agent --owner local_agent_app
 psql "postgresql://local_agent_app:<password>@localhost:5432/local_agent" -f agent/db/schema.sql
 ```
 
-This creates the app's five tables (`pending_items`, `email_checkpoint`,
-`notified_milestones`, `claude_sessions`, `oauth_credentials`). LangGraph's
-own checkpoint tables are created automatically on first app startup.
+This creates the app's six tables (`pending_items`, `email_checkpoint`,
+`notified_milestones`, `claude_sessions`, `oauth_credentials`,
+`processed_messages`). LangGraph's own checkpoint tables are created
+automatically on first app startup.
 
 ### 3. Configure secrets
 
@@ -161,7 +162,8 @@ This repo is **spec-driven**: no implementation code is written for a phase
 until that phase's spec exists in `specs/` and has been explicitly approved.
 See [`CLAUDE.md`](CLAUDE.md) for the full rule and the per-phase process.
 
-No test runner, linter, or formatter is configured yet.
+Tests run via `pytest` (`.venv/bin/python -m pytest -q`, 232 passing). No
+linter or formatter is configured yet.
 
 Regenerate the pinned lockfile after adding/upgrading a dependency:
 

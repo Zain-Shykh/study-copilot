@@ -1,6 +1,7 @@
 """Gemini client wrapper: intent classification, tool-calling read answers,
 and email summarization."""
 
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Callable
@@ -8,8 +9,11 @@ from typing import Callable
 from google import genai
 from google.genai import types
 
+logger = logging.getLogger(__name__)
+
 _MAX_ATTEMPTS = 3
 _BACKOFF_SECONDS = 1.0
+FALLBACK_MODEL = "gemma-4-31b-it"
 
 CLASSIFY_SYSTEM_PROMPT = """\
 You classify one inbound WhatsApp message into exactly one category by
@@ -127,7 +131,7 @@ def answer_question(
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     system_instruction = f"Today's date is {today} (UTC).\n\n{ANSWER_SYSTEM_PROMPT}"
 
-    def call():
+    def call(model):
         return client.models.generate_content(
             model=model,
             contents=text,
@@ -140,7 +144,7 @@ def answer_question(
             ),
         )
 
-    response = _with_retry(call)
+    response = _with_retry(call, model)
     if not response.text:
         raise RuntimeError("answer_question: model produced no final text")
     return response.text
@@ -153,15 +157,26 @@ present in the snippet. Structured, no preamble, no closing remarks.
 """
 
 
-def _with_retry(fn):
+def _with_retry(fn: Callable[[str], object], model: str):
+    """Calls fn(model) up to _MAX_ATTEMPTS times with exponential backoff.
+    If every attempt against the primary model fails, makes one further
+    attempt against FALLBACK_MODEL before giving up."""
     last_error = None
     for attempt in range(_MAX_ATTEMPTS):
         try:
-            return fn()
+            return fn(model)
         except Exception as e:  # noqa: BLE001 - transient network/5xx/429 from the API
             last_error = e
             if attempt < _MAX_ATTEMPTS - 1:
                 time.sleep(_BACKOFF_SECONDS * (2**attempt))
+
+    if model != FALLBACK_MODEL:
+        logger.warning("%s exhausted retries, falling back to %s", model, FALLBACK_MODEL)
+        try:
+            return fn(FALLBACK_MODEL)
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+
     raise last_error
 
 
@@ -169,7 +184,7 @@ def classify_intent(client: genai.Client, model: str, text: str) -> tuple[str, d
     """Classifies an inbound message into (intent, args) via a forced
     route_message function call. Raises after 3 failed attempts."""
 
-    def call():
+    def call(model):
         return client.models.generate_content(
             model=model,
             contents=text,
@@ -185,7 +200,7 @@ def classify_intent(client: genai.Client, model: str, text: str) -> tuple[str, d
             ),
         )
 
-    response = _with_retry(call)
+    response = _with_retry(call, model)
     call_ = response.function_calls[0]
     args = dict(call_.args or {})
     return args.pop("intent"), args
@@ -204,7 +219,7 @@ def summarize_emails(client: genai.Client, model: str, emails: list[dict]) -> st
         )
     content = "\n\n".join(lines)
 
-    def call():
+    def call(model):
         return client.models.generate_content(
             model=model,
             contents=content,
@@ -213,7 +228,7 @@ def summarize_emails(client: genai.Client, model: str, emails: list[dict]) -> st
             ),
         )
 
-    response = _with_retry(call)
+    response = _with_retry(call, model)
     return response.text
 
 
@@ -243,7 +258,7 @@ def parse_confirmation_reply(client: genai.Client, model: str, question: str, re
     3 failed attempts."""
     content = f"Question asked: {question}\nUser's reply: {reply_text}"
 
-    def call():
+    def call(model):
         return client.models.generate_content(
             model=model,
             contents=content,
@@ -259,7 +274,7 @@ def parse_confirmation_reply(client: genai.Client, model: str, question: str, re
             ),
         )
 
-    response = _with_retry(call)
+    response = _with_retry(call, model)
     return response.function_calls[0].args["answer"]
 
 
@@ -294,7 +309,7 @@ def resolve_disambiguation(client: genai.Client, model: str, candidate_lines: li
     1-based index, or 0 if unclear. Raises after 3 failed attempts."""
     content = "Candidates:\n" + "\n".join(candidate_lines) + f"\n\nUser's reply: {reply_text}"
 
-    def call():
+    def call(model):
         return client.models.generate_content(
             model=model,
             contents=content,
@@ -310,7 +325,7 @@ def resolve_disambiguation(client: genai.Client, model: str, candidate_lines: li
             ),
         )
 
-    response = _with_retry(call)
+    response = _with_retry(call, model)
     return int(response.function_calls[0].args["choice"])
 
 
@@ -349,7 +364,7 @@ def parse_review_reply(client: genai.Client, model: str, reply_text: str) -> tup
     feedback). feedback is only non-None for "revise". Raises after 3
     failed attempts."""
 
-    def call():
+    def call(model):
         return client.models.generate_content(
             model=model,
             contents=reply_text,
@@ -364,7 +379,7 @@ def parse_review_reply(client: genai.Client, model: str, reply_text: str) -> tup
             ),
         )
 
-    response = _with_retry(call)
+    response = _with_retry(call, model)
     args = response.function_calls[0].args
     return args["decision"], args.get("feedback")
 
@@ -426,7 +441,7 @@ def draft_email(
         parts.append(f"Requested changes: {feedback}")
     content = "\n\n".join(parts)
 
-    def call():
+    def call(model):
         return client.models.generate_content(
             model=model,
             contents=content,
@@ -441,6 +456,6 @@ def draft_email(
             ),
         )
 
-    response = _with_retry(call)
+    response = _with_retry(call, model)
     args = response.function_calls[0].args
     return args["subject"], args["body"]

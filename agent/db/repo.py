@@ -101,17 +101,23 @@ def get_pending_item(conn: psycopg.Connection, message_id: str) -> dict | None:
     return {"message_id": row[0], "thread_id": row[1], "item_type": row[2], "display_name": row[3]}
 
 
-def list_pending_items(conn: psycopg.Connection, item_type: str) -> list[dict]:
-    """All currently-pending items of one type, for fuzzy by-name matching
-    when a reply doesn't use WhatsApp's reply-to-message feature."""
+def list_pending_items(conn: psycopg.Connection, item_type: str | None = None) -> list[dict]:
+    """All currently-pending items, optionally filtered to one item_type
+    ('assignment' or 'email'). item_type=None returns both — needed for
+    the by-name fallback, which must consider email drafts and assignment
+    drafts together."""
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT whatsapp_message_id, thread_id, item_type, display_name
-            FROM pending_items WHERE item_type = %s AND status = 'pending'
-            """,
-            (item_type,),
-        )
+        if item_type is None:
+            cur.execute(
+                "SELECT whatsapp_message_id, thread_id, item_type, display_name "
+                "FROM pending_items WHERE status = 'pending'"
+            )
+        else:
+            cur.execute(
+                "SELECT whatsapp_message_id, thread_id, item_type, display_name "
+                "FROM pending_items WHERE item_type = %s AND status = 'pending'",
+                (item_type,),
+            )
         rows = cur.fetchall()
     return [
         {"message_id": r[0], "thread_id": r[1], "item_type": r[2], "display_name": r[3]}

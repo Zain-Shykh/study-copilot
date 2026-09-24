@@ -13,8 +13,9 @@ from psycopg_pool import ConnectionPool
 
 from agent.config import load_settings
 from agent.graph.assignment_graph import build_assignment_graph
+from agent.graph.email_graph import build_email_graph
 from agent.graph.nodes.whatsapp_send import send_whatsapp_message
-from agent.graph.recovery import scan_for_interrupted_assignments
+from agent.graph.recovery import scan_for_interrupted_threads
 from agent.graph.router_graph import build_router_graph
 from agent.scheduler.jobs import poll_classroom_job, poll_gmail_job
 from agent.webhook.routes import router as webhook_router
@@ -46,21 +47,24 @@ def create_app() -> FastAPI:
             app.state.genai_client = genai.Client(api_key=settings.gemini_api_key)
             app.state.graph = build_router_graph(checkpointer)
             app.state.assignment_graph = build_assignment_graph(checkpointer)
+            app.state.email_graph = build_email_graph(checkpointer)
             app.state.background_tasks: set[asyncio.Task] = set()
 
             with pool.connection() as conn:
-                interrupted_titles = await scan_for_interrupted_assignments(app.state.assignment_graph, conn)
-            for title in interrupted_titles:
+                interrupted = await scan_for_interrupted_threads(
+                    app.state.assignment_graph, app.state.email_graph, conn
+                )
+            for name in interrupted:
                 try:
                     await send_whatsapp_message(
                         settings.meta_whatsapp_access_token,
                         settings.meta_whatsapp_phone_number_id,
                         settings.my_whatsapp_number,
-                        f'I was working on "{title}" when I restarted — send '
-                        f'"work on {title}" again if you\'d like me to retry.',
+                        f'I was working on "{name}" when I restarted — send it '
+                        "again if you'd like me to retry.",
                     )
                 except Exception:
-                    logger.exception("Failed to send crash-recovery heads-up for %s", title)
+                    logger.exception("Failed to send crash-recovery heads-up for %s", name)
 
             scheduler = AsyncIOScheduler()
             scheduler.add_job(

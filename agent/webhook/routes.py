@@ -91,6 +91,7 @@ async def _process_text_message(
                     "whatsapp_access_token": settings.meta_whatsapp_access_token,
                     "whatsapp_phone_number_id": settings.meta_whatsapp_phone_number_id,
                     "assignment_graph": request.app.state.assignment_graph,
+                    "email_graph": request.app.state.email_graph,
                     "background_tasks": request.app.state.background_tasks,
                 }
             },

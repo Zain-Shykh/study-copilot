@@ -16,7 +16,7 @@ from langgraph.types import interrupt
 from agent import google_auth, llm
 from agent.db import repo
 from agent.graph.nodes import claude_code, ingestion
-from agent.graph.nodes.whatsapp_send import send_whatsapp_document, send_whatsapp_message
+from agent.graph.nodes.whatsapp_send import send_whatsapp_message
 from agent.workspace import paths
 
 logger = logging.getLogger(__name__)
@@ -138,15 +138,19 @@ async def relay_node(state: AssignmentState, config: RunnableConfig) -> dict:
 
     manifest = state["manifest"]
     submission_files = state["submission_files"]
+    pool = configurable["pool"]
+
+    with pool.connection() as conn:
+        clients = google_auth.load_google_clients(conn)
+    if isinstance(clients, str):
+        logger.error("Couldn't upload draft to Drive for review (%s): %s", sender, clients)
+        return {}
+    _, _, drive_service = clients
 
     try:
-        for rel_path, file_path in zip(manifest["files"], submission_files):
-            flat_name = rel_path.replace("/", "__")
-            await send_whatsapp_document(
-                access_token, phone_number_id, sender, Path(file_path), filename=flat_name
-            )
-    except httpx.HTTPStatusError:
-        logger.exception("Failed to send submission document(s) to %s", sender)
+        drive_links = [_upload_to_drive(drive_service, Path(f)) for f in submission_files]
+    except Exception:  # noqa: BLE001 - Drive HttpError or transport error
+        logger.exception("Failed to upload draft to Drive for %s", sender)
         return {}
 
     summary_text = state.get("summary_text") or ""
@@ -156,7 +160,10 @@ async def relay_node(state: AssignmentState, config: RunnableConfig) -> dict:
             f"Skipped unsupported material(s): {', '.join(unsupported_files)}\n\n{summary_text}"
         )
     summary_text = summary_text.strip() or "Draft ready."
-    message_text = f"{summary_text}\n\nReply approve, suggest changes, or say reject."
+    links_text = "\n".join(
+        f"{rel_path}: {link}" for rel_path, link in zip(manifest["files"], drive_links)
+    )
+    message_text = f"{summary_text}\n\n{links_text}\n\nReply approve, suggest changes, or say reject."
 
     try:
         message_id = await send_whatsapp_message(access_token, phone_number_id, sender, message_text)
@@ -164,7 +171,6 @@ async def relay_node(state: AssignmentState, config: RunnableConfig) -> dict:
         logger.exception("Failed to send draft summary to %s", sender)
         return {}
 
-    pool = configurable["pool"]
     thread_id = configurable["thread_id"]
     display_name = f'{state["course_name"]} — {state["title"]}'
     with pool.connection() as conn:

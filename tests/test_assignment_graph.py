@@ -213,9 +213,9 @@ class TestSaveSessionNode:
 class TestRelayNode:
     def test_failure_text_sends_failure_message_only(self, monkeypatch):
         send_mock = AsyncMock(return_value="wamid.OUT1")
-        doc_mock = AsyncMock()
         monkeypatch.setattr(ag, "send_whatsapp_message", send_mock)
-        monkeypatch.setattr(ag, "send_whatsapp_document", doc_mock)
+        upload_mock = MagicMock()
+        monkeypatch.setattr(ag, "_upload_to_drive", upload_mock)
         create_mock = MagicMock()
         monkeypatch.setattr(ag.repo, "create_pending_item", create_mock)
         state = dict(STATE, failure_text="Something broke")
@@ -224,7 +224,7 @@ class TestRelayNode:
 
         assert result == {}
         send_mock.assert_awaited_once_with("test-token", "phone123", "923115224115", "Something broke")
-        doc_mock.assert_not_awaited()
+        upload_mock.assert_not_called()
         create_mock.assert_not_called()
 
     def test_failure_text_send_error_is_swallowed(self, monkeypatch):
@@ -235,11 +235,12 @@ class TestRelayNode:
 
         assert result == {}
 
-    def test_success_sends_documents_then_summary_and_creates_pending_item(self, monkeypatch):
+    def test_success_uploads_to_drive_then_sends_summary_and_creates_pending_item(self, monkeypatch):
         send_mock = AsyncMock(return_value="wamid.OUT1")
-        doc_mock = AsyncMock()
         monkeypatch.setattr(ag, "send_whatsapp_message", send_mock)
-        monkeypatch.setattr(ag, "send_whatsapp_document", doc_mock)
+        monkeypatch.setattr(ag.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+        upload_mock = MagicMock(return_value="https://drive.google.com/x")
+        monkeypatch.setattr(ag, "_upload_to_drive", upload_mock)
         create_mock = MagicMock()
         monkeypatch.setattr(ag.repo, "create_pending_item", create_mock)
         config = _config()
@@ -255,17 +256,19 @@ class TestRelayNode:
         result = asyncio.run(ag.relay_node(state, config))
 
         assert result == {}
-        doc_mock.assert_awaited_once_with(
-            "test-token", "phone123", "923115224115", Path("/tmp/x/submission/main.py"), filename="main.py"
-        )
+        upload_mock.assert_called_once_with("drive", Path("/tmp/x/submission/main.py"))
         send_mock.assert_awaited_once_with(
-            "test-token", "phone123", "923115224115", "Great job.\n\nReply approve, suggest changes, or say reject."
+            "test-token",
+            "phone123",
+            "923115224115",
+            "Great job.\n\nmain.py: https://drive.google.com/x\n\nReply approve, suggest changes, or say reject.",
         )
         create_mock.assert_called_once_with(conn, "wamid.OUT1", "assignment:c1:cw1", "assignment", "Algorithms — HW1")
 
     def test_unsupported_files_are_prefixed_to_summary(self, monkeypatch):
         monkeypatch.setattr(ag, "send_whatsapp_message", AsyncMock(return_value="wamid.OUT1"))
-        monkeypatch.setattr(ag, "send_whatsapp_document", AsyncMock())
+        monkeypatch.setattr(ag.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+        monkeypatch.setattr(ag, "_upload_to_drive", lambda svc, f: "https://drive.google.com/x")
         monkeypatch.setattr(ag.repo, "create_pending_item", MagicMock())
         state = dict(
             STATE,
@@ -282,7 +285,8 @@ class TestRelayNode:
 
     def test_empty_summary_defaults_to_draft_ready(self, monkeypatch):
         monkeypatch.setattr(ag, "send_whatsapp_message", AsyncMock(return_value="wamid.OUT1"))
-        monkeypatch.setattr(ag, "send_whatsapp_document", AsyncMock())
+        monkeypatch.setattr(ag.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+        monkeypatch.setattr(ag, "_upload_to_drive", lambda svc, f: "https://drive.google.com/x")
         monkeypatch.setattr(ag.repo, "create_pending_item", MagicMock())
         state = dict(
             STATE,
@@ -297,27 +301,55 @@ class TestRelayNode:
         body = ag.send_whatsapp_message.call_args[0][3]
         assert body.startswith("Draft ready.")
 
-    def test_nested_path_flattens_filename_with_double_underscore(self, monkeypatch):
+    def test_links_text_lists_each_manifest_file(self, monkeypatch):
         monkeypatch.setattr(ag, "send_whatsapp_message", AsyncMock(return_value="wamid.OUT1"))
-        doc_mock = AsyncMock()
-        monkeypatch.setattr(ag, "send_whatsapp_document", doc_mock)
+        monkeypatch.setattr(ag.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+        links = iter(["https://drive.google.com/a", "https://drive.google.com/b"])
+        monkeypatch.setattr(ag, "_upload_to_drive", lambda svc, f: next(links))
         monkeypatch.setattr(ag.repo, "create_pending_item", MagicMock())
         state = dict(
             STATE,
-            manifest={"format": "zip", "files": ["src/main.py"]},
-            submission_files=["/tmp/x/hw1.zip"],
+            manifest={"format": "zip", "files": ["src/main.py", "README.md"]},
+            submission_files=["/tmp/x/submission/src/main.py", "/tmp/x/submission/README.md"],
             summary_text="Done.",
             unsupported_files=[],
         )
-        # manifest["files"] zipped against submission_files positionally
+
         asyncio.run(ag.relay_node(state, _config()))
 
-        assert doc_mock.call_args[1]["filename"] == "src__main.py"
+        body = ag.send_whatsapp_message.call_args[0][3]
+        assert "src/main.py: https://drive.google.com/a" in body
+        assert "README.md: https://drive.google.com/b" in body
 
-    def test_document_send_error_stops_before_summary(self, monkeypatch):
+    def test_drive_auth_failure_stops_before_summary(self, monkeypatch):
         send_mock = AsyncMock(return_value="wamid.OUT1")
         monkeypatch.setattr(ag, "send_whatsapp_message", send_mock)
-        monkeypatch.setattr(ag, "send_whatsapp_document", AsyncMock(side_effect=_http_status_error()))
+        monkeypatch.setattr(ag.google_auth, "load_google_clients", lambda conn: "auth message")
+        create_mock = MagicMock()
+        monkeypatch.setattr(ag.repo, "create_pending_item", create_mock)
+        state = dict(
+            STATE,
+            manifest={"format": "as-is", "files": ["main.py"]},
+            submission_files=["/tmp/x/submission/main.py"],
+            summary_text="Great job.",
+            unsupported_files=[],
+        )
+
+        result = asyncio.run(ag.relay_node(state, _config()))
+
+        assert result == {}
+        send_mock.assert_not_awaited()
+        create_mock.assert_not_called()
+
+    def test_drive_upload_error_stops_before_summary(self, monkeypatch):
+        send_mock = AsyncMock(return_value="wamid.OUT1")
+        monkeypatch.setattr(ag, "send_whatsapp_message", send_mock)
+        monkeypatch.setattr(ag.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+
+        def raising(svc, f):
+            raise RuntimeError("Drive quota exceeded")
+
+        monkeypatch.setattr(ag, "_upload_to_drive", raising)
         create_mock = MagicMock()
         monkeypatch.setattr(ag.repo, "create_pending_item", create_mock)
         state = dict(
@@ -335,7 +367,8 @@ class TestRelayNode:
         create_mock.assert_not_called()
 
     def test_summary_send_error_skips_pending_item_creation(self, monkeypatch):
-        monkeypatch.setattr(ag, "send_whatsapp_document", AsyncMock())
+        monkeypatch.setattr(ag.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+        monkeypatch.setattr(ag, "_upload_to_drive", lambda svc, f: "https://drive.google.com/x")
         monkeypatch.setattr(ag, "send_whatsapp_message", AsyncMock(side_effect=_http_status_error()))
         create_mock = MagicMock()
         monkeypatch.setattr(ag.repo, "create_pending_item", create_mock)
@@ -666,7 +699,6 @@ def _stub_common_dependencies(monkeypatch, tmp_path):
         ),
     )
     monkeypatch.setattr(ag, "send_whatsapp_message", AsyncMock(return_value="wamid.OUT1"))
-    monkeypatch.setattr(ag, "send_whatsapp_document", AsyncMock())
     monkeypatch.setattr(ag.repo, "create_pending_item", MagicMock())
     monkeypatch.setattr(ag.repo, "close_pending_item", MagicMock())
     monkeypatch.setattr(ag.repo, "save_claude_session", MagicMock())

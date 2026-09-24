@@ -11,8 +11,10 @@ spec lives in `docs/product_definition.md`; **read it before implementing any
 feature** — it's the source of truth for scope, permissions, and behavior, and this
 file only summarizes the architecture that spans multiple files.
 
-This repo currently contains only the scaffold: every file under `agent/` has a
-one-line docstring naming its purpose but no implementation yet.
+Phases 0–4 (from `docs/implementation_plan.md`) plus the standalone
+email-drafting feature are all implemented — see `docs/ARCHITECTURE.md` for
+diagrams of the system as it's actually built today, and `specs/` for each
+feature's approved implementation spec.
 
 ## Development workflow — spec-driven, phase by phase
 
@@ -77,7 +79,11 @@ System-level (non-pip) dependencies required, installed via `apt`, not pip:
 - `postgresql` — local state store
 - `pandoc` — document format conversion (used via the `pypandoc` wrapper)
 
-No test runner, linter, or formatter is configured yet.
+Tests run via `pytest` (configured in `pyproject.toml`, `testpaths = ["tests"]`):
+```bash
+.venv/bin/python -m pytest -q
+```
+No linter or formatter is configured yet.
 
 ## Architecture
 

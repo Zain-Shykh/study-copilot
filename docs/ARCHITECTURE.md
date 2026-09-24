@@ -174,10 +174,47 @@ ready is not recoverable this way (still executing, no checkpoint to
 resume from) — a crash *after* the draft was sent, while waiting on your
 "approve"/"revise" reply, is fully recoverable.
 
+## 4. Email graph — as implemented today
+
+Thread ID: `email:<uuid>`. One instance per drafted email (reply or new);
+multiple can be paused at their own `interrupt()` simultaneously, same as
+assignments. Unlike the assignment graph, approval is single-stage — there
+is no separate submission step, so "approve" sends directly.
+
+```mermaid
+flowchart TD
+    START(["spawned with mode (reply/new),<br/>topic, recipient"]) --> DRAFT["draft_node<br/>(loads original body if replying,<br/>Gemini generates subject+body)"]
+
+    DRAFT --> REL["relay_node<br/>(sends draft + creates<br/>pending_items row)"]
+
+    REL -- "ingest/draft failed" --> END1(["END — failure message sent"])
+    REL -- "success" --> AWAIT["await_review_node<br/>interrupt() — PAUSED"]
+
+    AWAIT -.->|"durable across restarts<br/>(Postgres checkpoint)"| RESUME(["user replies"])
+    RESUME --> PARSE["parse_review_node<br/>(Gemini: approve / revise / reject)"]
+
+    PARSE -- "revise" --> REVISE["revise_node<br/>(regenerates with feedback,<br/>keeps original context)"]
+    REVISE --> REL
+    PARSE -- "reject" --> END2(["END<br/>(pending_items row closed)"])
+    PARSE -- "approve" --> SEND["send_node<br/>(Gmail messages.send;<br/>reply sets In-Reply-To/References<br/>+ threadId;<br/>closes pending_items row on success only)"]
+
+    SEND --> RELS["relay_send_node<br/>(sends outcome message —<br/>failure leaves pending_items open,<br/>retry-safe on next 'approve')"]
+    RELS --> END3(["END"])
+```
+
+Approving a *reply* keeps the recipient/thread fixed to the original
+message (RFC 5322 `In-Reply-To`/`References` headers plus Gmail's own
+`threadId`, both captured when the source message was resolved); a *new*
+email requires the literal recipient address up front — no fuzzy contact
+matching. A send failure leaves the `pending_items` row open rather than
+closing it, so replying "approve" again retries without losing the draft
+(mirrors the assignment graph's submission-prep retry pattern). See
+`specs/email-drafting.md` for the full design.
+
 ## Thread-ID summary
 
 | Graph | Thread ID pattern | Lifetime |
 |---|---|---|
 | Router | `user:<whatsapp-number>` | One per user, effectively permanent |
 | Assignment | `assignment:<course_id>:<coursework_id>` | One per assignment, from "work on X" to terminal (reject/decline/submit) |
-| Email-draft | `email:<uuid>` | **Not implemented yet** — scaffold only |
+| Email-draft | `email:<uuid>` | One per drafted email, from resolution to terminal (reject/send) |

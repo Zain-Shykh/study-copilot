@@ -1,5 +1,9 @@
 # Documentation Audit — Findings (2026-09-24)
 
+**Status: all items below fixed** (see "Recommended fixes" section — items
+1–5 applied on 2026-09-24). Findings kept as a record of what was stale and
+why, not as an open TODO list.
+
 Cross-checked every file in `docs/` and `specs/` against the actual code in
 `agent/`/`tests/` as of commit `4763829` (email drafting spec + implementation,
 branch `worktree-spec-email-drafting`). Scope: documentation drift only — not

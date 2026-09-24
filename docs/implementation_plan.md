@@ -223,6 +223,14 @@ Gmail; rejecting discards it; revising regenerates it" — dropped here since
 there is no email-drafting engine yet for it to apply to; see
 `specs/phase-3-approval-submission.md` Decision #1.)
 
+**Update:** email drafting was subsequently built via a standalone spec,
+`specs/email-drafting.md` (outside the 0–4 phase sequence above), restoring
+that dropped acceptance criterion — approving an email draft sends it via
+Gmail, rejecting discards it, revising regenerates it, with its own
+`interrupt()`-based approval loop mirroring assignments' (single-stage:
+"approve" sends directly, no separate submission step). See
+`docs/ARCHITECTURE.md` §4 for the email graph's node/edge diagram.
+
 ---
 
 ## Phase 4 — Proactive mode

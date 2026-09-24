@@ -8,6 +8,7 @@ from typing import Callable
 
 from google import genai
 from google.genai import types
+from langsmith import traceable
 
 from agent.config import USER_TIMEZONE
 
@@ -16,6 +17,12 @@ logger = logging.getLogger(__name__)
 _MAX_ATTEMPTS = 3
 _BACKOFF_SECONDS = 1.0
 FALLBACK_MODEL = "gemma-4-31b-it"
+
+
+def _drop_client(inputs: dict) -> dict:
+    """process_inputs for @traceable — the genai.Client instance isn't
+    useful trace content, just noise."""
+    return {k: v for k, v in inputs.items() if k != "client"}
 
 CLASSIFY_SYSTEM_PROMPT = """\
 You classify one inbound WhatsApp message into exactly one category by
@@ -120,6 +127,7 @@ a short, direct reply. Rules:
 """
 
 
+@traceable(run_type="llm", name="answer_question", process_inputs=_drop_client)
 def answer_question(
     client: genai.Client,
     model: str,
@@ -192,6 +200,7 @@ def _with_retry(fn: Callable[[str], object], model: str):
         return _retry_model(fn, FALLBACK_MODEL)
 
 
+@traceable(run_type="llm", name="classify_intent", process_inputs=_drop_client)
 def classify_intent(client: genai.Client, model: str, text: str) -> tuple[str, dict]:
     """Classifies an inbound message into (intent, args) via a forced
     route_message function call. Raises after 3 failed attempts."""
@@ -218,6 +227,7 @@ def classify_intent(client: genai.Client, model: str, text: str) -> tuple[str, d
     return args.pop("intent"), args
 
 
+@traceable(run_type="llm", name="summarize_emails", process_inputs=_drop_client)
 def summarize_emails(client: genai.Client, model: str, emails: list[dict]) -> str:
     """Returns a concise digest of the given emails as plain text. Raises
     after 3 failed attempts."""
@@ -264,6 +274,7 @@ guess "confirm" without a clear affirmative signal.
 """
 
 
+@traceable(run_type="llm", name="parse_confirmation_reply", process_inputs=_drop_client)
 def parse_confirmation_reply(client: genai.Client, model: str, question: str, reply_text: str) -> str:
     """Classifies a reply to a yes/no confirmation question as "confirm" or
     "decline" via a forced record_confirmation function call. Raises after
@@ -312,6 +323,7 @@ reply doesn't clearly pick one of the listed candidates, return 0.
 """
 
 
+@traceable(run_type="llm", name="resolve_disambiguation", process_inputs=_drop_client)
 def resolve_disambiguation(client: genai.Client, model: str, candidate_lines: list[str], reply_text: str) -> int:
     """Classifies which numbered candidate the reply refers to via a forced
     record_choice function call. candidate_lines are pre-formatted "N. ..."
@@ -371,6 +383,7 @@ keeps the draft alive for another round instead of silently discarding it
 """
 
 
+@traceable(run_type="llm", name="parse_review_reply", process_inputs=_drop_client)
 def parse_review_reply(client: genai.Client, model: str, reply_text: str) -> tuple[str, str | None]:
     """Classifies a draft-review reply into ("approve"|"revise"|"reject",
     feedback). feedback is only non-None for "revise". Raises after 3
@@ -429,6 +442,7 @@ according to those changes while keeping the rest of the draft consistent
 """
 
 
+@traceable(run_type="llm", name="draft_email", process_inputs=_drop_client)
 def draft_email(
     client: genai.Client,
     model: str,

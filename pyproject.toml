@@ -6,6 +6,7 @@ dependencies = [
     "langgraph",
     "langchain-core",
     "langgraph-checkpoint-postgres",
+    "langsmith",
     "psycopg[binary]",
     "psycopg-pool",
     "fastapi",

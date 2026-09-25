@@ -412,15 +412,21 @@ If the assignment asks you to identify yourself in the submission or its \
 filename (e.g. a roll number, student ID, or name), use exactly this: \
 __STUDENT_INFO__
 
+You have no way to run or execute anything (no Bash, no code execution) — \
+only Read/Write/Edit/WebSearch/WebFetch. For a coding assignment, write \
+the most careful, correct code you can by reasoning it through and \
+tracing it by hand — you cannot compile, run, or test it yourself, so say \
+so plainly in summary.txt rather than claiming it works.
+
 Write your complete response under submission/ in this directory — one or \
 more files, organized into subfolders if the required structure calls for \
 it (e.g. submission/src/main.py, submission/tests/test_main.py), using \
 whatever names/extensions fit the content (Markdown for prose, .py/.js/\
-etc. for code, and so on). You cannot produce a .zip or a real .pdf \
-yourself, so never write one directly — instead, also write \
+etc. for code, and so on). You cannot produce a .zip or a real .pdf/pptx/\
+docx yourself, so never write one directly — instead, also write \
 submission_manifest.json in this directory (not under submission/) \
 describing how those files should be packaged:
-  {"format": "as-is" | "zip" | "pdf" | "docx", "files": ["<paths relative to submission/, e.g. src/main.py>"], "output_name": "<optional, no extension>"}
+  {"format": "as-is" | "zip" | "pdf" | "docx" | "pptx", "files": ["<paths relative to submission/, e.g. src/main.py>"], "output_name": "<optional, no extension>"}
 - "as-is": upload each listed file unchanged (e.g. a single .py file, or \
   Classroom accepts multiple separate attachments). Only valid for flat \
   files directly under submission/ — no subfolders, since loose uploads \
@@ -431,14 +437,15 @@ describing how those files should be packaged:
   whatever subfolder structure it's in under submission/. Required \
   whenever submission/ has more than a flat list of files, or the \
   assignment explicitly asks for a zip.
-- "pdf" / "docx": convert the listed file(s) (must be Markdown/text, flat, \
-  no subfolders) to that format, one output file per input file listed.
+- "pdf" / "docx" / "pptx": convert the listed file(s) (must be Markdown/\
+  text, flat, no subfolders) to that format, one output file per input \
+  file listed.
 Use "as-is" for a single flat file, "zip" whenever there's a real folder \
 structure or the assignment explicitly asks for one, otherwise follow \
 whatever specific format the assignment states. Set "output_name" only \
 when the assignment specifies an exact filename for the packaged "zip"/\
-"pdf"/"docx" output (e.g. "submit a zip named your roll number") — omit \
-it otherwise.
+"pdf"/"docx"/"pptx" output (e.g. "submit a zip named your roll number") — \
+omit it otherwise.
 
 When done, also write a short plain-text summary (sources used, key \
 assumptions made, anything you couldn't find or access) to summary.txt in \
@@ -496,7 +503,8 @@ async def run_claude_code(
     args = [
         "claude", "-p", prompt,
         "--output-format", "json",
-        "--allowedTools", "Read,Write,Edit,WebSearch,WebFetch",
+        "--tools", _TOOLS,
+        "--allowedTools", _TOOLS,
     ]
     if resume_session_id:
         args += ["--resume", resume_session_id]
@@ -509,6 +517,12 @@ async def run_claude_code(
 Everything else in this file (the lock, the env stripping, the timeout,
 `Bash` never being granted) is unchanged from Phase 2 — see Decision #8 for
 why `Bash` still isn't granted even though this phase adds zip/PDF output.
+**Post-launch**: Bash was seriously investigated as a way to let Claude
+Code compile/run/verify code, then explicitly rejected after live testing
+found the CLI's `--restricted` sandbox mode does not reliably confine
+Bash-executed code's file reads to the workspace — see
+`specs/sandboxed-bash-execution.md` for the full investigation and why. No
+Bash was ever shipped.
 
 **Post-launch fix**: `--allowedTools` gained `Edit` (now
 `Read,Write,Edit,WebSearch,WebFetch`). Found via a live failure whose actual
@@ -524,6 +538,28 @@ process exits (returncode 0) without ever reaching the
 actually produced the "Claude Code finished without writing
 submission_manifest.json" failure text. `Write`-then-`Edit` on the same
 file is an ordinary, common coding pattern, so this wasn't an edge case.
+
+**Post-launch fix (2)**: `_TOOLS = "Read,Write,Edit,WebSearch,WebFetch"` is
+now passed to *both* `--tools` and `--allowedTools`, not just
+`--allowedTools`. These are different flags — `--allowedTools` only
+pre-approves specific actions, while `--tools` controls which tools are
+*offered to the model as existing at all*. Without `--tools`, `Bash`
+remained visible as an option (denied on each attempt, not absent) — and
+both real failure transcripts (the one that motivated the `Edit` fix above,
+and the Bash investigation in `specs/sandboxed-bash-execution.md`) show
+Claude Code retrying `Bash` several times before giving up, wasting turns
+each time. Live-tested: with `--tools` explicitly excluding Bash, a prompt
+that directly asked it to run a shell command produced zero Bash attempts —
+it said outright that no shell tool was available and moved on, instead of
+trying and getting denied.
+
+**Post-launch fix (3)**: `_VALID_FORMATS` gained `"pptx"` (now `{"as-is",
+"zip", "pdf", "docx", "pptx"}`) — pandoc already supports Markdown→PPTX
+conversion (confirmed via `pandoc --list-output-formats`), so this only
+required widening the accepted-format set; `_package_submission`'s
+existing generic `pypandoc.convert_file` branch (§5.2) needed no code
+change. `DRAFT_PROMPT_TEMPLATE`'s manifest schema and format-bullet list
+mention `"pptx"` alongside `"pdf"`/`"docx"` throughout.
 
 ---
 
@@ -701,7 +737,7 @@ Shape:
 
 ```json
 {
-  "format": "as-is" | "zip" | "pdf" | "docx",
+  "format": "as-is" | "zip" | "pdf" | "docx" | "pptx",
   "files": ["<path relative to submission/, e.g. main.py or src/main.py>", "..."],
   "output_name": "<optional, no extension>"
 }
@@ -941,7 +977,7 @@ acceptance criteria (per Decision #8, not in the original plan text):
 |---|---|
 | `agent/db/repo.py` | Add `get_claude_session`, `create_pending_item`, `get_pending_item`, `list_pending_items`, `close_pending_item` |
 | `agent/llm.py` | Add `respond_to_pending` intent + `pending_item_reference` arg; add `REVIEW_DECLARATION`/`parse_review_reply` |
-| `agent/graph/nodes/claude_code.py` | `run_claude_code` gains `resume_session_id`/`feedback` params, `REVISE_PROMPT_TEMPLATE`; **`DRAFT_PROMPT` rewritten** and the success check changed to require `submission/` + a valid `submission_manifest.json` instead of `draft.md` (Decision #8 — revises Phase 2 behavior). **Post-launch fix**: `--allowedTools` gains `Edit`; `DRAFT_PROMPT` → `DRAFT_PROMPT_TEMPLATE` + `_build_draft_prompt`/`student_info` param; `"output_name"` added to the manifest contract and its validation |
+| `agent/graph/nodes/claude_code.py` | `run_claude_code` gains `resume_session_id`/`feedback` params, `REVISE_PROMPT_TEMPLATE`; **`DRAFT_PROMPT` rewritten** and the success check changed to require `submission/` + a valid `submission_manifest.json` instead of `draft.md` (Decision #8 — revises Phase 2 behavior). **Post-launch fix**: `--allowedTools` gains `Edit`; `DRAFT_PROMPT` → `DRAFT_PROMPT_TEMPLATE` + `_build_draft_prompt`/`student_info` param; `"output_name"` added to the manifest contract and its validation. **Post-launch fix (2)**: `_TOOLS` constant passed to both `--tools` and `--allowedTools` (no Bash — see `specs/sandboxed-bash-execution.md` for the rejected Bash investigation) so Claude Code never even attempts Bash instead of retrying a denied one; `_VALID_FORMATS` gains `"pptx"` |
 | `agent/graph/nodes/drive.py` | **Post-launch fix**: `ZIP_MIMETYPES` + a zip-extraction branch (with `_safe_extract` guarding against path traversal) in `resolve_attachment`, so `.zip` attachments are no longer silently marked unsupported |
 | `agent/graph/assignment_graph.py` | Add `revise_node`, `await_review_node`, `parse_review_node`, `ask_submit_node`, `await_submit_node`, `parse_submit_node`, `submission_prep_node`, `relay_submit_node`; extend `AssignmentState` (`submission_files`/`manifest`/`final_files`/`drive_links` replace `draft_path`/`final_docx_path`/`drive_link`); `relay_node` now sends N documents instead of one; `submission_prep_node` branches on the manifest's format (zip via stdlib `zipfile`, pdf/docx via Pandoc, as-is direct upload) instead of a fixed Pandoc-to-docx call. **Post-launch fix**: `relay_node` no longer sends WhatsApp documents — it uploads each submission file to Drive (via the existing `_upload_to_drive` helper) and sends their links in the summary text instead; `draft_node` forwards `configurable["student_info"]` to `run_claude_code`; `_package_submission` honors an optional manifest `output_name` |
 | `agent/graph/router_graph.py` | Add `_find_targeted_pending_item`, `handle_pending_item_reply`, `resolve_pending_item_node`, `handle_pending_item_disambiguation_node`; extend `route_entry_node`/`route_after_entry`/`route_after_classify`; guard `send_reply_node` against an absent `reply_text`. **Post-launch fix**: `run_assignment_flow` gains a `student_info` param, threaded into the assignment graph's own `configurable` dict; its one call site (in `handle_confirmation_node`) passes `configurable.get("student_info", "")` |

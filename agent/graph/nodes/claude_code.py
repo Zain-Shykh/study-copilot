@@ -17,7 +17,14 @@ _invocation_lock = asyncio.Lock()
 
 _TIMEOUT_SECONDS = 15 * 60
 
-_VALID_FORMATS = {"as-is", "zip", "pdf", "docx"}
+_VALID_FORMATS = {"as-is", "zip", "pdf", "docx", "pptx"}
+
+# No Bash — investigated and explicitly rejected, see
+# specs/sandboxed-bash-execution.md for why (live-tested, unreliable
+# sandbox confinement for arbitrary code reading files outside the
+# workspace, not just occasionally but reproducibly under the exact tool
+# combination this app needs).
+_TOOLS = "Read,Write,Edit,WebSearch,WebFetch"
 
 DRAFT_PROMPT_TEMPLATE = """\
 Read every file under source-material/ in this directory (including \
@@ -35,15 +42,21 @@ If the assignment asks you to identify yourself in the submission or its \
 filename (e.g. a roll number, student ID, or name), use exactly this: \
 __STUDENT_INFO__
 
+You have no way to run or execute anything (no Bash, no code execution) — \
+only Read/Write/Edit/WebSearch/WebFetch. For a coding assignment, write \
+the most careful, correct code you can by reasoning it through and \
+tracing it by hand — you cannot compile, run, or test it yourself, so say \
+so plainly in summary.txt rather than claiming it works.
+
 Write your complete response under submission/ in this directory — one or \
 more files, organized into subfolders if the required structure calls for \
 it (e.g. submission/src/main.py, submission/tests/test_main.py), using \
 whatever names/extensions fit the content (Markdown for prose, .py/.js/\
-etc. for code, and so on). You cannot produce a .zip or a real .pdf \
-yourself, so never write one directly — instead, also write \
+etc. for code, and so on). You cannot produce a .zip or a real .pdf/pptx/\
+docx yourself, so never write one directly — instead, also write \
 submission_manifest.json in this directory (not under submission/) \
 describing how those files should be packaged:
-  {"format": "as-is" | "zip" | "pdf" | "docx", "files": ["<paths relative to submission/, e.g. src/main.py>"], "output_name": "<optional, no extension>"}
+  {"format": "as-is" | "zip" | "pdf" | "docx" | "pptx", "files": ["<paths relative to submission/, e.g. src/main.py>"], "output_name": "<optional, no extension>"}
 - "as-is": upload each listed file unchanged (e.g. a single .py file, or \
   Classroom accepts multiple separate attachments). Only valid for flat \
   files directly under submission/ — no subfolders, since loose uploads \
@@ -54,14 +67,15 @@ describing how those files should be packaged:
   whatever subfolder structure it's in under submission/. Required \
   whenever submission/ has more than a flat list of files, or the \
   assignment explicitly asks for a zip.
-- "pdf" / "docx": convert the listed file(s) (must be Markdown/text, flat, \
-  no subfolders) to that format, one output file per input file listed.
+- "pdf" / "docx" / "pptx": convert the listed file(s) (must be Markdown/\
+  text, flat, no subfolders) to that format, one output file per input \
+  file listed.
 Use "as-is" for a single flat file, "zip" whenever there's a real folder \
 structure or the assignment explicitly asks for one, otherwise follow \
 whatever specific format the assignment states. Set "output_name" only \
 when the assignment specifies an exact filename for the packaged "zip"/\
-"pdf"/"docx" output (e.g. "submit a zip named your roll number") — omit \
-it otherwise.
+"pdf"/"docx"/"pptx" output (e.g. "submit a zip named your roll number") — \
+omit it otherwise.
 
 When done, also write a short plain-text summary (sources used, key \
 assumptions made, anything you couldn't find or access) to summary.txt in \
@@ -141,9 +155,11 @@ async def run_claude_code(
     feedback: str | None = None,
     student_info: str = "",
 ) -> dict:
-    """Runs a headless Claude Code session scoped to workspace_dir, no Bash,
-    no broader filesystem, no Google credentials in its environment. A
-    fresh submission when resume_session_id is None (student_info, if set,
+    """Runs a headless Claude Code session scoped to workspace_dir via
+    --tools=_TOOLS (Read/Write/Edit/WebSearch/WebFetch only — no Bash, no
+    code execution of any kind; see the module comment above _TOOLS for
+    why), no Google credentials in its environment. A fresh submission
+    when resume_session_id is None (student_info, if set,
     is given to it for filenames/output naming the assignment asks to be
     personalized); otherwise resumes that session with feedback as a
     revision request.
@@ -175,8 +191,10 @@ async def run_claude_code(
         prompt,
         "--output-format",
         "json",
+        "--tools",
+        _TOOLS,
         "--allowedTools",
-        "Read,Write,Edit,WebSearch,WebFetch",
+        _TOOLS,
     ]
     if resume_session_id:
         args += ["--resume", resume_session_id]

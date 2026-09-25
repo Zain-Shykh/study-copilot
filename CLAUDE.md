@@ -129,9 +129,12 @@ Drafting is delegated to the Claude Code CLI running headless
 `agent/graph/nodes/claude_code.py` — using the user's own Pro/Max login, not a
 separate Anthropic API key. That headless session's working directory is scoped
 to exactly one assignment's folder (`~/agent-workspace/<course>/<assignment>/`),
-with read/write limited to `source-material/` in and `draft.md` out, plus
-WebSearch/WebFetch — no Bash, no broader filesystem, no Google API credentials, so
-it is structurally incapable of sending or submitting anything. Only one headless
+with Read/Write/Edit limited to `source-material/` in and `submission/` +
+`submission_manifest.json` + `summary.txt` out, plus WebSearch/WebFetch — no
+Bash (see `specs/sandboxed-bash-execution.md`: investigated and explicitly
+rejected — sandbox confinement proved unreliable), no broader filesystem, no
+Google API credentials, so it is structurally incapable of sending or
+submitting anything. Only one headless
 session runs at a time, process-wide, enforced with an in-process `asyncio.Lock`
 (not a durable cross-restart lock).
 

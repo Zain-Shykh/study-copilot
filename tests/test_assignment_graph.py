@@ -114,6 +114,7 @@ class TestRouteAfterIngest:
 class TestDraftNode:
     def test_success_stringifies_submission_file_paths(self, tmp_path, monkeypatch):
         monkeypatch.setattr(ag.paths, "assignment_dir", lambda course, title: tmp_path)
+        monkeypatch.setattr(ag.repo, "get_claude_session", lambda conn, thread_id: None)
         submission_file = tmp_path / "submission" / "main.py"
         monkeypatch.setattr(
             ag.claude_code,
@@ -138,18 +139,25 @@ class TestDraftNode:
             "session_id": "sess1",
         }
 
-    def test_failure_returns_failure_text(self, tmp_path, monkeypatch):
+    def test_failure_returns_failure_text_and_session_id(self, tmp_path, monkeypatch):
         monkeypatch.setattr(ag.paths, "assignment_dir", lambda course, title: tmp_path)
+        monkeypatch.setattr(ag.repo, "get_claude_session", lambda conn, thread_id: None)
         monkeypatch.setattr(
-            ag.claude_code, "run_claude_code", AsyncMock(return_value={"success": False, "error": "timed out"})
+            ag.claude_code,
+            "run_claude_code",
+            AsyncMock(return_value={"success": False, "error": "timed out", "session_id": "sess-partial"}),
         )
 
         result = asyncio.run(ag.draft_node(dict(STATE), _config()))
 
-        assert result == {"failure_text": 'Drafting "HW1" failed: timed out'}
+        assert result == {
+            "failure_text": 'Drafting "HW1" failed: timed out',
+            "session_id": "sess-partial",
+        }
 
     def test_student_info_is_forwarded_to_claude_code(self, tmp_path, monkeypatch):
         monkeypatch.setattr(ag.paths, "assignment_dir", lambda course, title: tmp_path)
+        monkeypatch.setattr(ag.repo, "get_claude_session", lambda conn, thread_id: None)
         run_mock = AsyncMock(
             return_value={
                 "success": True,
@@ -163,10 +171,13 @@ class TestDraftNode:
 
         asyncio.run(ag.draft_node(dict(STATE), _config(student_info="Roll number: 22-CS-045")))
 
-        run_mock.assert_awaited_once_with(tmp_path, student_info="Roll number: 22-CS-045")
+        run_mock.assert_awaited_once_with(
+            tmp_path, resume_session_id=None, student_info="Roll number: 22-CS-045"
+        )
 
     def test_missing_student_info_defaults_to_empty_string(self, tmp_path, monkeypatch):
         monkeypatch.setattr(ag.paths, "assignment_dir", lambda course, title: tmp_path)
+        monkeypatch.setattr(ag.repo, "get_claude_session", lambda conn, thread_id: None)
         run_mock = AsyncMock(
             return_value={
                 "success": True,
@@ -180,7 +191,64 @@ class TestDraftNode:
 
         asyncio.run(ag.draft_node(dict(STATE), _config()))
 
-        run_mock.assert_awaited_once_with(tmp_path, student_info="")
+        run_mock.assert_awaited_once_with(tmp_path, resume_session_id=None, student_info="")
+
+    def test_prior_session_is_resumed_instead_of_starting_fresh(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ag.paths, "assignment_dir", lambda course, title: tmp_path)
+        monkeypatch.setattr(ag.repo, "get_claude_session", lambda conn, thread_id: "sess-prior")
+        run_mock = AsyncMock(
+            return_value={
+                "success": True,
+                "submission_files": [tmp_path / "submission" / "main.py"],
+                "manifest": {"format": "as-is", "files": ["main.py"]},
+                "summary_text": "Done.",
+                "session_id": "sess-prior",
+            }
+        )
+        monkeypatch.setattr(ag.claude_code, "run_claude_code", run_mock)
+
+        asyncio.run(ag.draft_node(dict(STATE), _config()))
+
+        run_mock.assert_awaited_once_with(tmp_path, resume_session_id="sess-prior", student_info="")
+
+    def test_failed_resume_falls_back_to_one_fresh_attempt(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ag.paths, "assignment_dir", lambda course, title: tmp_path)
+        monkeypatch.setattr(ag.repo, "get_claude_session", lambda conn, thread_id: "sess-broken")
+        run_mock = AsyncMock(
+            side_effect=[
+                {"success": False, "error": "unresumable session", "session_id": None},
+                {
+                    "success": True,
+                    "submission_files": [tmp_path / "submission" / "main.py"],
+                    "manifest": {"format": "as-is", "files": ["main.py"]},
+                    "summary_text": "Done.",
+                    "session_id": "sess-fresh",
+                },
+            ]
+        )
+        monkeypatch.setattr(ag.claude_code, "run_claude_code", run_mock)
+
+        result = asyncio.run(ag.draft_node(dict(STATE), _config()))
+
+        assert result["session_id"] == "sess-fresh"
+        assert run_mock.await_count == 2
+        first_call, second_call = run_mock.await_args_list
+        assert first_call.kwargs["resume_session_id"] == "sess-broken"
+        assert second_call.kwargs.get("resume_session_id") is None
+
+    def test_failed_resume_with_no_fresh_fallback_when_no_prior_session(self, tmp_path, monkeypatch):
+        # The one-retry fallback only applies when a resume was actually
+        # attempted — a first-ever (non-resume) failure shouldn't retry
+        # itself a second time within the same draft_node call.
+        monkeypatch.setattr(ag.paths, "assignment_dir", lambda course, title: tmp_path)
+        monkeypatch.setattr(ag.repo, "get_claude_session", lambda conn, thread_id: None)
+        run_mock = AsyncMock(return_value={"success": False, "error": "boom", "session_id": None})
+        monkeypatch.setattr(ag.claude_code, "run_claude_code", run_mock)
+
+        result = asyncio.run(ag.draft_node(dict(STATE), _config()))
+
+        assert result == {"failure_text": 'Drafting "HW1" failed: boom', "session_id": None}
+        run_mock.assert_awaited_once()
 
 
 class TestReviseNode:
@@ -794,6 +862,7 @@ def _stub_common_dependencies(monkeypatch, tmp_path):
     monkeypatch.setattr(ag.repo, "create_pending_item", MagicMock())
     monkeypatch.setattr(ag.repo, "close_pending_item", MagicMock())
     monkeypatch.setattr(ag.repo, "save_claude_session", MagicMock())
+    monkeypatch.setattr(ag.repo, "get_claude_session", lambda conn, thread_id: None)
     monkeypatch.setattr(ag, "_package_submission", lambda *a: [tmp_path / "hw1.pdf"])
     monkeypatch.setattr(ag, "_upload_to_drive", lambda svc, f: "https://drive.google.com/hw1")
 

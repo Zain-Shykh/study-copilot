@@ -131,6 +131,13 @@ class TestValidateManifest:
 
         assert result == {"format": "as-is", "files": ["main.py"]}
 
+    def test_pptx_format_is_valid(self, tmp_path):
+        workspace = _valid_workspace(tmp_path, fmt="pptx")
+
+        result = claude_code._validate_manifest(workspace)
+
+        assert result == {"format": "pptx", "files": ["main.py"]}
+
     def test_output_name_absent_is_valid(self, tmp_path):
         workspace = _valid_workspace(tmp_path)
 
@@ -189,7 +196,12 @@ class TestRunClaudeCode:
         assert "--resume" not in captured["args"]
         assert captured["kwargs"]["cwd"] == workspace
 
-    def test_allowed_tools_includes_edit(self, tmp_path, monkeypatch):
+    def test_tools_and_allowed_tools_exclude_bash(self, tmp_path, monkeypatch):
+        # --tools (not just --allowedTools) must omit Bash: passing only
+        # --allowedTools leaves Bash visible-but-denied, which live testing
+        # showed makes the model retry it repeatedly (wasted turns) before
+        # giving up — omitting it from --tools means it's never offered as
+        # an option at all. See specs/sandboxed-bash-execution.md.
         workspace = _valid_workspace(tmp_path)
         process = FakeProcess(stdout=json.dumps({"session_id": "s"}).encode(), returncode=0)
         captured = _patch_subprocess(monkeypatch, process)
@@ -197,7 +209,11 @@ class TestRunClaudeCode:
         asyncio.run(claude_code.run_claude_code(workspace))
 
         args = captured["args"]
+        assert args[args.index("--tools") + 1] == "Read,Write,Edit,WebSearch,WebFetch"
         assert args[args.index("--allowedTools") + 1] == "Read,Write,Edit,WebSearch,WebFetch"
+        assert "Bash" not in args[args.index("--tools") + 1]
+        assert "--restricted" not in args
+        assert "--permission-mode" not in args
 
     def test_student_info_is_interpolated_into_prompt(self, tmp_path, monkeypatch):
         workspace = _valid_workspace(tmp_path)

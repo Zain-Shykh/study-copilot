@@ -76,10 +76,28 @@ def route_after_ingest(state: AssignmentState) -> str:
 async def draft_node(state: AssignmentState, config: RunnableConfig) -> dict:
     dest_dir = paths.assignment_dir(state["course_name"], state["title"])
     student_info = config["configurable"].get("student_info", "")
-    result = await claude_code.run_claude_code(dest_dir, student_info=student_info)
+
+    pool = config["configurable"]["pool"]
+    thread_id = config["configurable"]["thread_id"]
+    with pool.connection() as conn:
+        prior_session_id = repo.get_claude_session(conn, thread_id)
+
+    result = await claude_code.run_claude_code(
+        dest_dir, resume_session_id=prior_session_id, student_info=student_info
+    )
+
+    if not result["success"] and prior_session_id:
+        # The saved session itself may be what's broken (unresumable, or
+        # the same structural issue that failed last time) — fall back to
+        # one fresh attempt rather than leaving a retry stuck resuming an
+        # identically-broken session forever.
+        result = await claude_code.run_claude_code(dest_dir, student_info=student_info)
 
     if not result["success"]:
-        return {"failure_text": f'Drafting "{state["title"]}" failed: {result["error"]}'}
+        return {
+            "failure_text": f'Drafting "{state["title"]}" failed: {result["error"]}',
+            "session_id": result.get("session_id"),
+        }
 
     return {
         "submission_files": [str(p) for p in result["submission_files"]],

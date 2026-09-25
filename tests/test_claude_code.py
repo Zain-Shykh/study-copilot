@@ -251,6 +251,19 @@ class TestRunClaudeCode:
         prompt = args[args.index("-p") + 1]
         assert "Add a conclusion." in prompt
 
+    def test_resume_without_feedback_uses_resume_after_failure_prompt(self, tmp_path, monkeypatch):
+        workspace = _valid_workspace(tmp_path)
+        process = FakeProcess(stdout=json.dumps({"session_id": "sess2"}).encode(), returncode=0)
+        captured = _patch_subprocess(monkeypatch, process)
+
+        result = asyncio.run(claude_code.run_claude_code(workspace, resume_session_id="sess1"))
+
+        assert result["success"] is True
+        args = captured["args"]
+        assert args[args.index("--resume") + 1] == "sess1"
+        prompt = args[args.index("-p") + 1]
+        assert prompt == claude_code.RESUME_AFTER_FAILURE_PROMPT
+
     def test_blocked_env_vars_are_stripped(self, tmp_path, monkeypatch):
         workspace = _valid_workspace(tmp_path)
         process = FakeProcess(stdout=json.dumps({"session_id": "s"}).encode(), returncode=0)
@@ -276,7 +289,7 @@ class TestRunClaudeCode:
 
         result = asyncio.run(claude_code.run_claude_code(tmp_path))
 
-        assert result == {"success": False, "error": "boom"}
+        assert result == {"success": False, "error": "boom", "session_id": None}
 
     def test_nonzero_exit_with_no_stderr_uses_generic_message(self, tmp_path, monkeypatch):
         process = FakeProcess(stderr=b"", returncode=1)
@@ -284,7 +297,17 @@ class TestRunClaudeCode:
 
         result = asyncio.run(claude_code.run_claude_code(tmp_path))
 
-        assert result == {"success": False, "error": "Claude Code exited with an error"}
+        assert result == {"success": False, "error": "Claude Code exited with an error", "session_id": None}
+
+    def test_nonzero_exit_still_captures_session_id_for_a_later_resume(self, tmp_path, monkeypatch):
+        process = FakeProcess(
+            stdout=json.dumps({"session_id": "sess-partial"}).encode(), stderr=b"boom", returncode=1
+        )
+        _patch_subprocess(monkeypatch, process)
+
+        result = asyncio.run(claude_code.run_claude_code(tmp_path))
+
+        assert result == {"success": False, "error": "boom", "session_id": "sess-partial"}
 
     def test_manifest_contract_violation_is_reported_as_failure(self, tmp_path, monkeypatch):
         # returncode 0 but nothing written under submission/
@@ -296,7 +319,17 @@ class TestRunClaudeCode:
         assert result == {
             "success": False,
             "error": "Claude Code finished without writing anything under submission/",
+            "session_id": None,
         }
+
+    def test_manifest_contract_violation_still_captures_session_id(self, tmp_path, monkeypatch):
+        process = FakeProcess(stdout=json.dumps({"session_id": "sess-partial"}).encode(), returncode=0)
+        _patch_subprocess(monkeypatch, process)
+
+        result = asyncio.run(claude_code.run_claude_code(tmp_path))
+
+        assert result["session_id"] == "sess-partial"
+        assert result["success"] is False
 
     def test_unparseable_stdout_session_id_falls_back_to_none(self, tmp_path, monkeypatch):
         workspace = _valid_workspace(tmp_path)
@@ -340,7 +373,7 @@ class TestRunClaudeCode:
 
         result = asyncio.run(claude_code.run_claude_code(tmp_path))
 
-        assert result == {"success": False, "error": "Claude Code timed out"}
+        assert result == {"success": False, "error": "Claude Code timed out", "session_id": None}
         assert process.killed is True
         assert process.waited is True
 

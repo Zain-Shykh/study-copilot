@@ -106,6 +106,15 @@ When done, overwrite summary.txt with an updated short plain-text summary \
 and what changed in this revision).
 """
 
+RESUME_AFTER_FAILURE_PROMPT = """\
+Your previous attempt at this assignment was interrupted before finishing \
+(e.g. a timeout or crash) — you may already have useful work in \
+submission/ from before. Check what's already there, keep what's still \
+correct, finish anything incomplete, and make sure submission_manifest.json \
+and summary.txt are both written correctly before you're done — the run \
+isn't considered complete without them.
+"""
+
 
 def _validate_manifest(workspace_dir: Path) -> dict | str:
     """Returns the parsed manifest dict on success, or an error string on
@@ -173,35 +182,41 @@ async def run_claude_code(
     --tools=_TOOLS (Read/Write/Edit/WebSearch/WebFetch only — no Bash, no
     code execution of any kind; see the module comment above _TOOLS for
     why), no Google credentials in its environment. A fresh submission
-    when resume_session_id is None (student_info, if set,
-    is given to it for filenames/output naming the assignment asks to be
-    personalized); otherwise resumes that session with feedback as a
-    revision request.
+    when resume_session_id is None (student_info, if set, is given to it
+    for filenames/output naming the assignment asks to be personalized);
+    with resume_session_id set and feedback given, resumes as a revision
+    request; with resume_session_id set and feedback None, resumes as a
+    continuation of a previously interrupted/failed attempt instead (see
+    RESUME_AFTER_FAILURE_PROMPT) — draft_node uses this to pick up where a
+    failed run left off instead of starting over from zero.
 
     Returns {"success": True, "session_id": ..., "submission_files": [Path, ...],
     "manifest": {...}, "summary_text": ...} on success, or
-    {"success": False, "error": ...} on a nonzero exit, or a
+    {"success": False, "error": ..., "session_id": ...} on a nonzero exit, or a
     submission/submission_manifest.json contract violation (missing
     submission/, missing/unparseable manifest, unrecognized format, a
     listed file that doesn't exist, or a nested path under a non-"zip"
     format) — same "reported as a failed run" handling as a missing
-    draft.md was in Phase 2. On a timeout, the process is killed, but
-    workspace_dir is checked for an already-valid manifest before giving
-    up — live-observed that the CLI's conversation can finish (with a
-    fully valid submission written to disk) well before the process
-    itself exits, and discarding that as a failure would throw away real,
-    completed work. Only reports {"success": False, "error": "Claude Code
-    timed out"} if the manifest isn't valid even after the kill.
-    session_id is always None in that recovered-on-timeout case (the
-    session id is only ever known via the CLI's own stdout, which a
-    killed process never got to print) — a subsequent revise_node call
-    starts a fresh session rather than --resume-ing.
+    draft.md was in Phase 2. session_id is included on these failures too
+    (extracted from stdout whenever the process actually ran and printed
+    a result, regardless of outcome) specifically so a failed attempt can
+    still be resumed on retry instead of discarded. On a timeout, the
+    process is killed, but workspace_dir is checked for an already-valid
+    manifest before giving up — live-observed that the CLI's conversation
+    can finish (with a fully valid submission written to disk) well
+    before the process itself exits, and discarding that as a failure
+    would throw away real, completed work. Only reports {"success": False,
+    "error": "Claude Code timed out", "session_id": None} if the manifest
+    isn't valid even after the kill — session_id is always None in that
+    case specifically (a killed process never gets to print its final
+    stdout JSON, the only place the session id is known).
     """
-    prompt = (
-        _build_draft_prompt(student_info)
-        if resume_session_id is None
-        else REVISE_PROMPT_TEMPLATE.format(feedback=feedback)
-    )
+    if resume_session_id is None:
+        prompt = _build_draft_prompt(student_info)
+    elif feedback is not None:
+        prompt = REVISE_PROMPT_TEMPLATE.format(feedback=feedback)
+    else:
+        prompt = RESUME_AFTER_FAILURE_PROMPT
 
     subprocess_env = {
         k: v
@@ -249,20 +264,24 @@ async def run_claude_code(
                 manifest_or_error = _validate_manifest(workspace_dir)
                 if isinstance(manifest_or_error, dict):
                     return _build_success_result(workspace_dir, manifest_or_error, session_id=None)
-                return {"success": False, "error": "Claude Code timed out"}
+                return {"success": False, "error": "Claude Code timed out", "session_id": None}
         except OSError as e:
-            return {"success": False, "error": f"Failed to start Claude Code: {e}"}
-
-        if process.returncode != 0:
-            return {"success": False, "error": stderr.decode(errors="replace") or "Claude Code exited with an error"}
-
-        manifest_or_error = _validate_manifest(workspace_dir)
-        if isinstance(manifest_or_error, str):
-            return {"success": False, "error": manifest_or_error}
+            return {"success": False, "error": f"Failed to start Claude Code: {e}", "session_id": None}
 
         try:
             session_id = json.loads(stdout.decode())["session_id"]
         except (json.JSONDecodeError, KeyError):
             session_id = None
+
+        if process.returncode != 0:
+            return {
+                "success": False,
+                "error": stderr.decode(errors="replace") or "Claude Code exited with an error",
+                "session_id": session_id,
+            }
+
+        manifest_or_error = _validate_manifest(workspace_dir)
+        if isinstance(manifest_or_error, str):
+            return {"success": False, "error": manifest_or_error, "session_id": session_id}
 
         return _build_success_result(workspace_dir, manifest_or_error, session_id)

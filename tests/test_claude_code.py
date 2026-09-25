@@ -343,3 +343,31 @@ class TestRunClaudeCode:
         assert result == {"success": False, "error": "Claude Code timed out"}
         assert process.killed is True
         assert process.waited is True
+
+    def test_timeout_recovers_success_if_manifest_already_valid_on_disk(self, tmp_path, monkeypatch):
+        # Live-observed: the CLI's own conversation can finish (files
+        # written, manifest/summary on disk) well before the process
+        # itself exits and hands control back to us — a timeout there
+        # shouldn't discard a real, completed submission.
+        workspace = _valid_workspace(tmp_path)
+        (workspace / "summary.txt").write_text("Done, all good.")
+        process = FakeProcess(returncode=0)
+        _patch_subprocess(monkeypatch, process)
+
+        async def fake_wait_for(coro, timeout):
+            coro.close()
+            raise asyncio.TimeoutError()
+
+        monkeypatch.setattr(claude_code.asyncio, "wait_for", fake_wait_for)
+
+        result = asyncio.run(claude_code.run_claude_code(workspace))
+
+        assert result == {
+            "success": True,
+            "session_id": None,
+            "submission_files": [workspace / "submission" / "main.py"],
+            "manifest": {"format": "as-is", "files": ["main.py"]},
+            "summary_text": "Done, all good.",
+        }
+        assert process.killed is True
+        assert process.waited is True

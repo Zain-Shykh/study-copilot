@@ -148,6 +148,20 @@ def _validate_manifest(workspace_dir: Path) -> dict | str:
     return manifest
 
 
+def _build_success_result(workspace_dir: Path, manifest: dict, session_id: str | None) -> dict:
+    submission_dir = workspace_dir / "submission"
+    submission_files = [submission_dir / rel_path for rel_path in manifest["files"]]
+    summary_path = workspace_dir / "summary.txt"
+    summary_text = summary_path.read_text() if summary_path.exists() else ""
+    return {
+        "success": True,
+        "session_id": session_id,
+        "submission_files": submission_files,
+        "manifest": manifest,
+        "summary_text": summary_text,
+    }
+
+
 async def run_claude_code(
     workspace_dir: Path,
     *,
@@ -166,12 +180,22 @@ async def run_claude_code(
 
     Returns {"success": True, "session_id": ..., "submission_files": [Path, ...],
     "manifest": {...}, "summary_text": ...} on success, or
-    {"success": False, "error": ...} on a nonzero exit, timeout, or a
+    {"success": False, "error": ...} on a nonzero exit, or a
     submission/submission_manifest.json contract violation (missing
     submission/, missing/unparseable manifest, unrecognized format, a
     listed file that doesn't exist, or a nested path under a non-"zip"
     format) — same "reported as a failed run" handling as a missing
-    draft.md was in Phase 2.
+    draft.md was in Phase 2. On a timeout, the process is killed, but
+    workspace_dir is checked for an already-valid manifest before giving
+    up — live-observed that the CLI's conversation can finish (with a
+    fully valid submission written to disk) well before the process
+    itself exits, and discarding that as a failure would throw away real,
+    completed work. Only reports {"success": False, "error": "Claude Code
+    timed out"} if the manifest isn't valid even after the kill.
+    session_id is always None in that recovered-on-timeout case (the
+    session id is only ever known via the CLI's own stdout, which a
+    killed process never got to print) — a subsequent revise_node call
+    starts a fresh session rather than --resume-ing.
     """
     prompt = (
         _build_draft_prompt(student_info)
@@ -215,6 +239,16 @@ async def run_claude_code(
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
+                # The CLI's own conversation can finish (files written,
+                # manifest/summary on disk) well before the process itself
+                # exits and hands control back — live-observed: a fully
+                # valid submission sitting on disk, discarded as a false
+                # "timed out" failure because we never checked. If the
+                # deliverables are actually there and valid, use them
+                # instead of throwing away real, completed work.
+                manifest_or_error = _validate_manifest(workspace_dir)
+                if isinstance(manifest_or_error, dict):
+                    return _build_success_result(workspace_dir, manifest_or_error, session_id=None)
                 return {"success": False, "error": "Claude Code timed out"}
         except OSError as e:
             return {"success": False, "error": f"Failed to start Claude Code: {e}"}
@@ -225,23 +259,10 @@ async def run_claude_code(
         manifest_or_error = _validate_manifest(workspace_dir)
         if isinstance(manifest_or_error, str):
             return {"success": False, "error": manifest_or_error}
-        manifest = manifest_or_error
-
-        submission_dir = workspace_dir / "submission"
-        submission_files = [submission_dir / rel_path for rel_path in manifest["files"]]
 
         try:
             session_id = json.loads(stdout.decode())["session_id"]
         except (json.JSONDecodeError, KeyError):
             session_id = None
 
-        summary_path = workspace_dir / "summary.txt"
-        summary_text = summary_path.read_text() if summary_path.exists() else ""
-
-        return {
-            "success": True,
-            "session_id": session_id,
-            "submission_files": submission_files,
-            "manifest": manifest,
-            "summary_text": summary_text,
-        }
+        return _build_success_result(workspace_dir, manifest_or_error, session_id)

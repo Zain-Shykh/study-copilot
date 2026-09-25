@@ -561,6 +561,27 @@ existing generic `pypandoc.convert_file` branch (§5.2) needed no code
 change. `DRAFT_PROMPT_TEMPLATE`'s manifest schema and format-bullet list
 mention `"pptx"` alongside `"pdf"`/`"docx"` throughout.
 
+**Post-launch fix (4)**: on `asyncio.TimeoutError`, `run_claude_code`
+now checks `_validate_manifest(workspace_dir)` (a new `_build_success_result`
+helper factors out the shared success-response construction) before
+reporting failure. Found via a live run whose own CLI session transcript
+(stored locally under `~/.claude/projects/<hashed-workspace-path>/`)
+showed the conversation ending cleanly — `stop_reason: "end_turn"`, both
+solution files written, a valid `submission_manifest.json`, a complete
+`summary.txt` — all inside about 5 of the 15 minutes budgeted, yet the
+app still reported "Claude Code timed out." The underlying `claude`
+process apparently doesn't always exit/hand control back promptly after
+finishing its conversational work; previously, that gap was enough for
+our own timeout to fire and discard an already-complete, valid submission
+as a false failure. Now, if the manifest is already valid on disk when
+the kill happens, that result is used instead — `session_id` is `None` in
+this recovered case (a killed process never gets to print its final
+stdout JSON, which is the only place the session id is known), so a
+subsequent revise starts a fresh Claude Code session rather than
+`--resume`-ing — an accepted, documented degradation, far better than
+discarding a completed draft and making the user wait through the full
+process again for nothing.
+
 ---
 
 ## 5. `agent/graph/assignment_graph.py` — rewrite

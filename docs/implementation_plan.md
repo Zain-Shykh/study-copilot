@@ -159,6 +159,14 @@ tracking, submission prep, `final.docx` generation, Drive upload.
 - After a successful first draft, `claude_sessions` has a row for that
   assignment's thread with a valid session ID.
 
+**Update:** Phase 3 (Decision #8) revised the drafting contract described
+above: Claude Code now writes `submission/` + `submission_manifest.json` +
+`summary.txt` instead of a single `draft.md`, and `relay_node` uploads the
+packaged submission to Drive and sends links rather than attaching `draft.md`
+as a WhatsApp document. See `specs/phase-3-approval-submission.md` Decision #8
+and `docs/product_definition.md`'s "Local workspace" layout for the current
+contract.
+
 ---
 
 ## Phase 3 — Approval + submission

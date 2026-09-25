@@ -360,8 +360,8 @@ data. Beyond that, behavior depends on the failure type:
                                        required structure calls for it; sent to
                                        WhatsApp for review as-is
          submission_manifest.json  ← declares how submission/ should be packaged
-                                       (as-is / zip / pdf / docx) — written by Claude
-                                       Code, executed mechanically at submission time
+                                       (as-is / zip / pdf / docx / pptx) — written by
+                                       Claude Code, executed mechanically at submission time
    ```
    Folders are **persistent** (kept after submission, not cleaned up) so past work
    stays browsable in Finder/Explorer. Drive is only touched at the last step —
@@ -373,8 +373,8 @@ data. Beyond that, behavior depends on the failure type:
    never a single fixed output type. Claude Code declares the packaging plan in
    `submission_manifest.json`; the main agent executes it mechanically at
    submission time — bundling into a `.zip` (stdlib `zipfile`, preserving
-   whatever folder structure Claude Code laid out), converting to `.pdf`/`.docx`
-   via **Pandoc** (the same dependency already used in reverse for ingesting
+   whatever folder structure Claude Code laid out), converting to `.pdf`/`.docx`/
+   `.pptx` via **Pandoc** (the same dependency already used in reverse for ingesting
    DOCX/ODT/RTF/PPTX attachments), or uploading files as-is — never
    interpreting the assignment's content or guidelines itself.
 7. **Local state store**: a single local **PostgreSQL** database holds all
@@ -443,7 +443,7 @@ data. Beyond that, behavior depends on the failure type:
 
 ### Document conversion
 - **Pandoc** (system binary, `sudo apt install -y pandoc`) — DOCX/ODT/RTF/PPTX
-  → Markdown on the way in, Markdown → `.docx`/`.pdf` on the way out (when an
+  → Markdown on the way in, Markdown → `.docx`/`.pdf`/`.pptx` on the way out (when an
   assignment's own guidelines call for that format; other formats are zipped
   or uploaded as-is instead — see Local Workspace layout)
 - `wkhtmltopdf` (system binary, `sudo apt install -y wkhtmltopdf`) — PDF engine

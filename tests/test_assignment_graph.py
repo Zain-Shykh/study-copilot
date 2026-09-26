@@ -66,7 +66,7 @@ class TestIngestNode:
 
         result = asyncio.run(ag.ingest_node(dict(STATE), _config()))
 
-        assert result == {"ingested": True, "unsupported_files": ["video.mov"]}
+        assert result == {"ingested": True, "unsupported_files": ["video.mov"], "failure_text": None}
         ingest_mock.assert_awaited_once_with("classroom", "drive", "c1", "cw1", tmp_path)
 
     def test_failure_with_failed_file_includes_filename_in_message(self, tmp_path, monkeypatch):
@@ -137,6 +137,7 @@ class TestDraftNode:
             "manifest": {"format": "as-is", "files": ["main.py"]},
             "summary_text": "Done.",
             "session_id": "sess1",
+            "failure_text": None,
         }
 
     def test_failure_returns_failure_text_and_session_id(self, tmp_path, monkeypatch):
@@ -966,6 +967,50 @@ class TestAssignmentGraphIntegration:
 
         assert final_snapshot.next == ()
         assert ag.claude_code.run_claude_code.await_count == 2  # initial draft + one revision
+
+    def test_stale_failure_text_from_earlier_failed_run_does_not_leak_into_later_success(
+        self, tmp_path, monkeypatch, graph
+    ):
+        # Regression test: a thread's checkpointed state persists across
+        # separate ainvoke() calls (e.g. two separate "work on X" retries).
+        # A prior run that failed and set failure_text must not have that
+        # value silently reported again by relay_node on a later run that
+        # actually succeeds — draft_node must clear it on success.
+        _stub_common_dependencies(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            ag.claude_code,
+            "run_claude_code",
+            AsyncMock(return_value={"success": False, "error": "Claude Code timed out", "session_id": None}),
+        )
+
+        asyncio.run(graph.ainvoke(dict(STATE), config=_graph_config()))
+        failed_snapshot = asyncio.run(graph.aget_state({"configurable": {"thread_id": THREAD_ID}}))
+        assert failed_snapshot.next == ()  # failure ends the run, not an interrupt
+        assert failed_snapshot.values["failure_text"] == 'Drafting "HW1" failed: Claude Code timed out'
+
+        # Retry: same thread_id, but this time drafting succeeds.
+        monkeypatch.setattr(
+            ag.claude_code,
+            "run_claude_code",
+            AsyncMock(
+                return_value={
+                    "success": True,
+                    "submission_files": [tmp_path / "submission" / "main.py"],
+                    "manifest": {"format": "as-is", "files": ["main.py"]},
+                    "summary_text": "Draft complete.",
+                    "session_id": "sess1",
+                }
+            ),
+        )
+        ag.send_whatsapp_message.reset_mock()
+
+        asyncio.run(graph.ainvoke(dict(STATE), config=_graph_config()))
+        success_snapshot = asyncio.run(graph.aget_state({"configurable": {"thread_id": THREAD_ID}}))
+
+        assert success_snapshot.values["failure_text"] is None
+        assert success_snapshot.next == ("await_review_node",)
+        sent_texts = [call.args[3] for call in ag.send_whatsapp_message.await_args_list]
+        assert not any("timed out" in t for t in sent_texts)
 
     def test_ingest_failure_ends_without_review_interrupt(self, tmp_path, monkeypatch, graph):
         monkeypatch.setattr(ag.google_auth, "load_google_clients", lambda conn: "Google access has expired")

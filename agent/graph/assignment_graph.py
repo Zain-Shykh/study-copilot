@@ -66,7 +66,7 @@ async def ingest_node(state: AssignmentState, config: RunnableConfig) -> dict:
             failure_text = f'Couldn\'t load the assignment details: {result["error"]}. {retry_hint}'
         return {"ingested": False, "failure_text": failure_text}
 
-    return {"ingested": True, "unsupported_files": result["unsupported_files"]}
+    return {"ingested": True, "unsupported_files": result["unsupported_files"], "failure_text": None}
 
 
 def route_after_ingest(state: AssignmentState) -> str:
@@ -104,6 +104,7 @@ async def draft_node(state: AssignmentState, config: RunnableConfig) -> dict:
         "manifest": result["manifest"],
         "summary_text": result["summary_text"],
         "session_id": result["session_id"],
+        "failure_text": None,
     }
 
 
@@ -126,6 +127,7 @@ async def revise_node(state: AssignmentState, config: RunnableConfig) -> dict:
         "manifest": result["manifest"],
         "summary_text": result["summary_text"],
         "session_id": result["session_id"],
+        "failure_text": None,
     }
 
 

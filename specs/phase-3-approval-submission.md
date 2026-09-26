@@ -582,6 +582,29 @@ subsequent revise starts a fresh Claude Code session rather than
 discarding a completed draft and making the user wait through the full
 process again for nothing.
 
+**Post-launch fix (5)**: `ingest_node`, `draft_node`, and `revise_node` now
+explicitly return `"failure_text": None` on every success path, instead of
+omitting the key. `AssignmentState` is a plain `TypedDict` with no reducers,
+so LangGraph merges each node's returned dict into the persisted checkpoint —
+any key a node's return value doesn't include simply keeps its prior value.
+Once `failure_text` was set by any genuine failure on a thread, it stayed set
+forever afterward: a later retry could ingest, draft, and even resume the
+same Claude Code session successfully, but `relay_node`'s very first check
+(`if state.get("failure_text"): ...`) would still see the *old* value and
+re-report the old failure — even though the run that just finished actually
+succeeded, produced a valid manifest, and never got as far as creating a
+`pending_items` row. Live-diagnosed on a real assignment thread: the CLI
+subprocess for a resumed session completed cleanly in under 10 seconds
+(confirmed via the session's own local transcript and a direct live
+reproduction of the exact call), and `claude_sessions.updated_at` was freshly
+written at the same moment — proving `draft_node` had returned a real
+`session_id` (which the timeout path never sets), yet the user still received
+the assignment's very first "Claude Code timed out" message, verbatim,
+unchanged, from what was actually a stale field. Fixed at the source — every
+success return in all three nodes now clears `failure_text` — rather than
+in `relay_node`, since any future node that can set failure_text on failure
+needs the same discipline on its own success path.
+
 ---
 
 ## 5. `agent/graph/assignment_graph.py` — rewrite
@@ -1000,7 +1023,7 @@ acceptance criteria (per Decision #8, not in the original plan text):
 | `agent/llm.py` | Add `respond_to_pending` intent + `pending_item_reference` arg; add `REVIEW_DECLARATION`/`parse_review_reply` |
 | `agent/graph/nodes/claude_code.py` | `run_claude_code` gains `resume_session_id`/`feedback` params, `REVISE_PROMPT_TEMPLATE`; **`DRAFT_PROMPT` rewritten** and the success check changed to require `submission/` + a valid `submission_manifest.json` instead of `draft.md` (Decision #8 — revises Phase 2 behavior). **Post-launch fix**: `--allowedTools` gains `Edit`; `DRAFT_PROMPT` → `DRAFT_PROMPT_TEMPLATE` + `_build_draft_prompt`/`student_info` param; `"output_name"` added to the manifest contract and its validation. **Post-launch fix (2)**: `_TOOLS` constant passed to both `--tools` and `--allowedTools` (no Bash — see `specs/sandboxed-bash-execution.md` for the rejected Bash investigation) so Claude Code never even attempts Bash instead of retrying a denied one; `_VALID_FORMATS` gains `"pptx"` |
 | `agent/graph/nodes/drive.py` | **Post-launch fix**: `ZIP_MIMETYPES` + a zip-extraction branch (with `_safe_extract` guarding against path traversal) in `resolve_attachment`, so `.zip` attachments are no longer silently marked unsupported |
-| `agent/graph/assignment_graph.py` | Add `revise_node`, `await_review_node`, `parse_review_node`, `ask_submit_node`, `await_submit_node`, `parse_submit_node`, `submission_prep_node`, `relay_submit_node`; extend `AssignmentState` (`submission_files`/`manifest`/`final_files`/`drive_links` replace `draft_path`/`final_docx_path`/`drive_link`); `relay_node` now sends N documents instead of one; `submission_prep_node` branches on the manifest's format (zip via stdlib `zipfile`, pdf/docx via Pandoc, as-is direct upload) instead of a fixed Pandoc-to-docx call. **Post-launch fix**: `relay_node` no longer sends WhatsApp documents — it uploads each submission file to Drive (via the existing `_upload_to_drive` helper) and sends their links in the summary text instead; `draft_node` forwards `configurable["student_info"]` to `run_claude_code`; `_package_submission` honors an optional manifest `output_name` |
+| `agent/graph/assignment_graph.py` | Add `revise_node`, `await_review_node`, `parse_review_node`, `ask_submit_node`, `await_submit_node`, `parse_submit_node`, `submission_prep_node`, `relay_submit_node`; extend `AssignmentState` (`submission_files`/`manifest`/`final_files`/`drive_links` replace `draft_path`/`final_docx_path`/`drive_link`); `relay_node` now sends N documents instead of one; `submission_prep_node` branches on the manifest's format (zip via stdlib `zipfile`, pdf/docx via Pandoc, as-is direct upload) instead of a fixed Pandoc-to-docx call. **Post-launch fix**: `relay_node` no longer sends WhatsApp documents — it uploads each submission file to Drive (via the existing `_upload_to_drive` helper) and sends their links in the summary text instead; `draft_node` forwards `configurable["student_info"]` to `run_claude_code`; `_package_submission` honors an optional manifest `output_name`. **Post-launch fix (2)**: `ingest_node`/`draft_node`/`revise_node` now explicitly clear `"failure_text": None` on every success return, so a stale failure from an earlier attempt on the same thread can no longer leak into `relay_node`'s failure check on a later, successful run |
 | `agent/graph/router_graph.py` | Add `_find_targeted_pending_item`, `handle_pending_item_reply`, `resolve_pending_item_node`, `handle_pending_item_disambiguation_node`; extend `route_entry_node`/`route_after_entry`/`route_after_classify`; guard `send_reply_node` against an absent `reply_text`. **Post-launch fix**: `run_assignment_flow` gains a `student_info` param, threaded into the assignment graph's own `configurable` dict; its one call site (in `handle_confirmation_node`) passes `configurable.get("student_info", "")` |
 | `agent/graph/state.py` | Document the third `pending_question["kind"]` value (no new fields) |
 | `agent/graph/recovery.py` | New — `scan_for_interrupted_assignments` |

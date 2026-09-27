@@ -632,6 +632,26 @@ correct file, and produced the correct answer — confirming the discovery gap
 is closed. `DRAFT_PROMPT_TEMPLATE`'s "no way to run or execute anything"
 line and `run_claude_code`'s docstring updated to list the new tools.
 
+**Post-launch fix (7)**: `relay_node`'s WhatsApp message (summary + Drive
+links + the approve/revise/reject footer) is capped at
+`_WHATSAPP_TEXT_LIMIT = 4096` — the Graph API's documented limit on a text
+message body. `summary_text` is free-form, unbounded Claude Code output, and
+live-broke on a real assignment: a 4,409-character `summary.txt` alone
+already exceeded the limit, and `send_whatsapp_message` failed with `400 Bad
+Request` — so the review request never reached the user at all (this run
+predates Post-launch fix (5), so it's also an instance of the stale
+`failure_text` problem that fix addressed). Rather than truncating the
+summary (losing information), when the combined message would exceed the
+limit, `relay_node` now attaches `summary.txt` itself as a WhatsApp document
+via the existing `send_whatsapp_document` helper (`agent/graph/nodes/
+whatsapp_send.py` — already used elsewhere, no new upload path), captioned
+"Draft summary (too long to send inline)", and sends the Drive links + footer
+as a separate, always-short text message. The common case (a short summary)
+is unchanged — one inline text message, exactly as before. Live-verified
+against the real oversized `summary.txt` that caused the original failure:
+the full inline message (4,568 chars) correctly exceeds the limit, and the
+links-only fallback message (157 chars) comfortably fits.
+
 ---
 
 ## 5. `agent/graph/assignment_graph.py` — rewrite
@@ -1050,7 +1070,7 @@ acceptance criteria (per Decision #8, not in the original plan text):
 | `agent/llm.py` | Add `respond_to_pending` intent + `pending_item_reference` arg; add `REVIEW_DECLARATION`/`parse_review_reply` |
 | `agent/graph/nodes/claude_code.py` | `run_claude_code` gains `resume_session_id`/`feedback` params, `REVISE_PROMPT_TEMPLATE`; **`DRAFT_PROMPT` rewritten** and the success check changed to require `submission/` + a valid `submission_manifest.json` instead of `draft.md` (Decision #8 — revises Phase 2 behavior). **Post-launch fix**: `--allowedTools` gains `Edit`; `DRAFT_PROMPT` → `DRAFT_PROMPT_TEMPLATE` + `_build_draft_prompt`/`student_info` param; `"output_name"` added to the manifest contract and its validation. **Post-launch fix (2)**: `_TOOLS` constant passed to both `--tools` and `--allowedTools` (no Bash — see `specs/sandboxed-bash-execution.md` for the rejected Bash investigation) so Claude Code never even attempts Bash instead of retrying a denied one; `_VALID_FORMATS` gains `"pptx"`. **Post-launch fix (6)**: `_TOOLS` gains `Glob`/`Grep` (read-only file/content discovery, closing a real "guessed the wrong filename, had no way to list the directory" failure) and `NotebookEdit` (structured `.ipynb` editing) — still no Bash |
 | `agent/graph/nodes/drive.py` | **Post-launch fix**: `ZIP_MIMETYPES` + a zip-extraction branch (with `_safe_extract` guarding against path traversal) in `resolve_attachment`, so `.zip` attachments are no longer silently marked unsupported |
-| `agent/graph/assignment_graph.py` | Add `revise_node`, `await_review_node`, `parse_review_node`, `ask_submit_node`, `await_submit_node`, `parse_submit_node`, `submission_prep_node`, `relay_submit_node`; extend `AssignmentState` (`submission_files`/`manifest`/`final_files`/`drive_links` replace `draft_path`/`final_docx_path`/`drive_link`); `relay_node` now sends N documents instead of one; `submission_prep_node` branches on the manifest's format (zip via stdlib `zipfile`, pdf/docx via Pandoc, as-is direct upload) instead of a fixed Pandoc-to-docx call. **Post-launch fix**: `relay_node` no longer sends WhatsApp documents — it uploads each submission file to Drive (via the existing `_upload_to_drive` helper) and sends their links in the summary text instead; `draft_node` forwards `configurable["student_info"]` to `run_claude_code`; `_package_submission` honors an optional manifest `output_name`. **Post-launch fix (2)**: `ingest_node`/`draft_node`/`revise_node` now explicitly clear `"failure_text": None` on every success return, so a stale failure from an earlier attempt on the same thread can no longer leak into `relay_node`'s failure check on a later, successful run |
+| `agent/graph/assignment_graph.py` | Add `revise_node`, `await_review_node`, `parse_review_node`, `ask_submit_node`, `await_submit_node`, `parse_submit_node`, `submission_prep_node`, `relay_submit_node`; extend `AssignmentState` (`submission_files`/`manifest`/`final_files`/`drive_links` replace `draft_path`/`final_docx_path`/`drive_link`); `relay_node` now sends N documents instead of one; `submission_prep_node` branches on the manifest's format (zip via stdlib `zipfile`, pdf/docx via Pandoc, as-is direct upload) instead of a fixed Pandoc-to-docx call. **Post-launch fix**: `relay_node` no longer sends WhatsApp documents — it uploads each submission file to Drive (via the existing `_upload_to_drive` helper) and sends their links in the summary text instead; `draft_node` forwards `configurable["student_info"]` to `run_claude_code`; `_package_submission` honors an optional manifest `output_name`. **Post-launch fix (2)**: `ingest_node`/`draft_node`/`revise_node` now explicitly clear `"failure_text": None` on every success return, so a stale failure from an earlier attempt on the same thread can no longer leak into `relay_node`'s failure check on a later, successful run. **Post-launch fix (3)**: `relay_node`'s WhatsApp message is capped at `_WHATSAPP_TEXT_LIMIT` (4096 chars, the Graph API's text-message limit) — when the summary pushes it over, `summary.txt` is attached as a document (via `send_whatsapp_document`) instead of being truncated, and the Drive links + footer are sent as a short text message |
 | `agent/graph/router_graph.py` | Add `_find_targeted_pending_item`, `handle_pending_item_reply`, `resolve_pending_item_node`, `handle_pending_item_disambiguation_node`; extend `route_entry_node`/`route_after_entry`/`route_after_classify`; guard `send_reply_node` against an absent `reply_text`. **Post-launch fix**: `run_assignment_flow` gains a `student_info` param, threaded into the assignment graph's own `configurable` dict; its one call site (in `handle_confirmation_node`) passes `configurable.get("student_info", "")` |
 | `agent/graph/state.py` | Document the third `pending_question["kind"]` value (no new fields) |
 | `agent/graph/recovery.py` | New — `scan_for_interrupted_assignments` |

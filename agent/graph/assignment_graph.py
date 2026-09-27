@@ -16,10 +16,13 @@ from langgraph.types import interrupt
 from agent import google_auth, llm
 from agent.db import repo
 from agent.graph.nodes import claude_code, ingestion
-from agent.graph.nodes.whatsapp_send import send_whatsapp_message
+from agent.graph.nodes.whatsapp_send import send_whatsapp_document, send_whatsapp_message
 from agent.workspace import paths
 
 logger = logging.getLogger(__name__)
+
+# WhatsApp Cloud API's documented cap on a text message's body.
+_WHATSAPP_TEXT_LIMIT = 4096
 
 
 class AssignmentState(TypedDict, total=False):
@@ -184,9 +187,26 @@ async def relay_node(state: AssignmentState, config: RunnableConfig) -> dict:
     links_text = "\n".join(
         f"{rel_path}: {link}" for rel_path, link in zip(manifest["files"], drive_links)
     )
-    message_text = f"{summary_text}\n\n{links_text}\n\nReply approve, suggest changes, or say reject."
+    footer = "Reply approve, suggest changes, or say reject."
+    message_text = f"{summary_text}\n\n{links_text}\n\n{footer}"
 
     try:
+        if len(message_text) > _WHATSAPP_TEXT_LIMIT:
+            # summary_text is free-form Claude Code output with no length
+            # cap, and can exceed WhatsApp's per-message limit on its own
+            # (live-observed: 400 Bad Request from the Graph API) — attach
+            # it as a document instead of truncating it, so nothing about
+            # the draft is lost; the links + footer are always short enough
+            # to fit inline.
+            dest_dir = paths.assignment_dir(state["course_name"], state["title"])
+            await send_whatsapp_document(
+                access_token,
+                phone_number_id,
+                sender,
+                dest_dir / "summary.txt",
+                caption="Draft summary (too long to send inline)",
+            )
+            message_text = f"{links_text}\n\n{footer}"
         message_id = await send_whatsapp_message(access_token, phone_number_id, sender, message_text)
     except httpx.HTTPStatusError:
         logger.exception("Failed to send draft summary to %s", sender)

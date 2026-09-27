@@ -424,6 +424,66 @@ class TestRelayNode:
         assert "src/main.py: https://drive.google.com/a" in body
         assert "README.md: https://drive.google.com/b" in body
 
+    def test_long_summary_is_attached_as_document_instead_of_inlined(self, tmp_path, monkeypatch):
+        # summary_text is free-form Claude Code output with no length cap
+        # and can exceed WhatsApp's 4096-char text-message limit on its
+        # own (live-observed: 400 Bad Request) — it must be attached as a
+        # document instead of inlined/truncated, with the links + footer
+        # (always short) sent as the text message.
+        monkeypatch.setattr(ag.paths, "assignment_dir", lambda course, title: tmp_path)
+        (tmp_path / "summary.txt").write_text("A" * 5000)
+        send_mock = AsyncMock(return_value="wamid.OUT1")
+        monkeypatch.setattr(ag, "send_whatsapp_message", send_mock)
+        doc_mock = AsyncMock(return_value="wamid.DOC1")
+        monkeypatch.setattr(ag, "send_whatsapp_document", doc_mock)
+        monkeypatch.setattr(ag.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+        monkeypatch.setattr(ag, "_upload_to_drive", lambda svc, f: "https://drive.google.com/x")
+        monkeypatch.setattr(ag.repo, "create_pending_item", MagicMock())
+        state = dict(
+            STATE,
+            manifest={"format": "as-is", "files": ["main.py"]},
+            submission_files=["/tmp/x/submission/main.py"],
+            summary_text="A" * 5000,
+            unsupported_files=[],
+        )
+
+        result = asyncio.run(ag.relay_node(state, _config()))
+
+        assert result == {}
+        doc_mock.assert_awaited_once_with(
+            "test-token",
+            "phone123",
+            "923115224115",
+            tmp_path / "summary.txt",
+            caption="Draft summary (too long to send inline)",
+        )
+        body = send_mock.call_args[0][3]
+        assert "A" * 5000 not in body
+        assert body == "main.py: https://drive.google.com/x\n\nReply approve, suggest changes, or say reject."
+
+    def test_short_summary_is_still_inlined_not_attached(self, monkeypatch):
+        send_mock = AsyncMock(return_value="wamid.OUT1")
+        monkeypatch.setattr(ag, "send_whatsapp_message", send_mock)
+        doc_mock = AsyncMock()
+        monkeypatch.setattr(ag, "send_whatsapp_document", doc_mock)
+        monkeypatch.setattr(ag.google_auth, "load_google_clients", lambda conn: ("gmail", "classroom", "drive"))
+        monkeypatch.setattr(ag, "_upload_to_drive", lambda svc, f: "https://drive.google.com/x")
+        monkeypatch.setattr(ag.repo, "create_pending_item", MagicMock())
+        state = dict(
+            STATE,
+            manifest={"format": "as-is", "files": ["main.py"]},
+            submission_files=["/tmp/x/submission/main.py"],
+            summary_text="Great job.",
+            unsupported_files=[],
+        )
+
+        result = asyncio.run(ag.relay_node(state, _config()))
+
+        assert result == {}
+        doc_mock.assert_not_called()
+        body = send_mock.call_args[0][3]
+        assert body.startswith("Great job.")
+
     def test_drive_auth_failure_stops_before_summary(self, monkeypatch):
         send_mock = AsyncMock(return_value="wamid.OUT1")
         monkeypatch.setattr(ag, "send_whatsapp_message", send_mock)

@@ -130,8 +130,12 @@ Drafting is delegated to the Claude Code CLI running headless
 separate Anthropic API key. That headless session's working directory is scoped
 to exactly one assignment's folder (`~/agent-workspace/<course>/<assignment>/`),
 with Read/Write/Edit limited to `source-material/` in and `submission/` +
-`submission_manifest.json` + `summary.txt` out, plus WebSearch/WebFetch — no
-Bash (see `specs/sandboxed-bash-execution.md`: investigated and explicitly
+`submission_manifest.json` + `summary.txt` out, plus Glob/Grep (read-only
+discovery — added after a live failure where a guessed source-material
+filename came back "does not exist" with no way to list the directory and
+find the real name), NotebookEdit (structured `.ipynb` cell editing, still no
+code execution), and WebSearch/WebFetch — no Bash (see
+`specs/sandboxed-bash-execution.md`: investigated and explicitly
 rejected — sandbox confinement proved unreliable), no broader filesystem, no
 Google API credentials, so it is structurally incapable of sending or
 submitting anything. Only one headless

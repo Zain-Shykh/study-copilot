@@ -187,6 +187,13 @@ No `--restricted`, no `--permission-mode`, no Bash pattern list — none of
 it survived the investigation. `_TIMEOUT_SECONDS` is unchanged at `15 * 60`
 (never raised in this round either).
 
+**Later update**: `_TOOLS` gained `Glob`, `Grep`, and `NotebookEdit` — see
+"Post-launch fix (6)" in `specs/phase-3-approval-submission.md` for why
+(a real filename-guessing failure with no way to list a directory) and how
+it was verified. Still no Bash, no execution of any kind — the conclusion
+of this investigation stands unchanged; only the read-only discovery
+surface grew.
+
 `DRAFT_PROMPT_TEMPLATE` gained one paragraph making the limitation
 explicit to the model, rather than letting it discover it by trial and
 error: *"You have no way to run or execute anything (no Bash, no code

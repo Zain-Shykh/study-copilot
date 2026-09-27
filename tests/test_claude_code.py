@@ -209,8 +209,9 @@ class TestRunClaudeCode:
         asyncio.run(claude_code.run_claude_code(workspace))
 
         args = captured["args"]
-        assert args[args.index("--tools") + 1] == "Read,Write,Edit,WebSearch,WebFetch"
-        assert args[args.index("--allowedTools") + 1] == "Read,Write,Edit,WebSearch,WebFetch"
+        expected_tools = "Read,Write,Edit,Glob,Grep,NotebookEdit,WebSearch,WebFetch"
+        assert args[args.index("--tools") + 1] == expected_tools
+        assert args[args.index("--allowedTools") + 1] == expected_tools
         assert "Bash" not in args[args.index("--tools") + 1]
         assert "--restricted" not in args
         assert "--permission-mode" not in args

@@ -23,8 +23,14 @@ _VALID_FORMATS = {"as-is", "zip", "pdf", "docx", "pptx"}
 # specs/sandboxed-bash-execution.md for why (live-tested, unreliable
 # sandbox confinement for arbitrary code reading files outside the
 # workspace, not just occasionally but reproducibly under the exact tool
-# combination this app needs).
-_TOOLS = "Read,Write,Edit,WebSearch,WebFetch"
+# combination this app needs). Glob/Grep are read-only discovery tools (no
+# execution) added after a live failure where Claude Code guessed a wrong
+# source-material filename, got "file does not exist", and had no way to
+# list the directory to find the real one — see the "Post-launch fix"
+# entry in specs/phase-3-approval-submission.md. NotebookEdit is Claude
+# Code's built-in structured .ipynb cell editor (still no code execution)
+# for the .ipynb assignments this app is asked to draft.
+_TOOLS = "Read,Write,Edit,Glob,Grep,NotebookEdit,WebSearch,WebFetch"
 
 DRAFT_PROMPT_TEMPLATE = """\
 Read every file under source-material/ in this directory (including \
@@ -43,7 +49,7 @@ filename (e.g. a roll number, student ID, or name), use exactly this: \
 __STUDENT_INFO__
 
 You have no way to run or execute anything (no Bash, no code execution) — \
-only Read/Write/Edit/WebSearch/WebFetch. For a coding assignment, write \
+only Read/Write/Edit/Glob/Grep/NotebookEdit/WebSearch/WebFetch. For a coding assignment, write \
 the most careful, correct code you can by reasoning it through and \
 tracing it by hand — you cannot compile, run, or test it yourself, so say \
 so plainly in summary.txt rather than claiming it works.
@@ -179,9 +185,9 @@ async def run_claude_code(
     student_info: str = "",
 ) -> dict:
     """Runs a headless Claude Code session scoped to workspace_dir via
-    --tools=_TOOLS (Read/Write/Edit/WebSearch/WebFetch only — no Bash, no
-    code execution of any kind; see the module comment above _TOOLS for
-    why), no Google credentials in its environment. A fresh submission
+    --tools=_TOOLS (Read/Write/Edit/Glob/Grep/NotebookEdit/WebSearch/WebFetch
+    only — no Bash, no code execution of any kind; see the module comment
+    above _TOOLS for why), no Google credentials in its environment. A fresh submission
     when resume_session_id is None (student_info, if set, is given to it
     for filenames/output naming the assignment asks to be personalized);
     with resume_session_id set and feedback given, resumes as a revision

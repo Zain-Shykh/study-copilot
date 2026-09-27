@@ -605,6 +605,33 @@ success return in all three nodes now clears `failure_text` — rather than
 in `relay_node`, since any future node that can set failure_text on failure
 needs the same discipline on its own success path.
 
+**Post-launch fix (6)**: `_TOOLS` gains `Glob`, `Grep`, and `NotebookEdit`
+(now `"Read,Write,Edit,Glob,Grep,NotebookEdit,WebSearch,WebFetch"`) — still
+no Bash, no code execution of any kind. Root-caused on a real assignment: the
+task brief pointed at "the assignment PDF," Claude Code guessed the filename
+as `assignment.pdf`, `Read` came back "File does not exist," and — with no
+`Glob`/`LS` and no Bash — it had no way to list `source-material/` and
+discover the file's real name (`Assignment 01.pdf`, capitalized, with a
+space). It gave up looking, reported "No separate assignment PDF was found,"
+and fell back to generic prior knowledge of the well-known public assignment
+this one was based on — silently missing several custom, graded requirements
+the real PDF stated (a required output format among them), including the
+final **submission format** (task-brief.md/the PDF can require a single zip
+archive; Claude Code produced flat "as-is" files instead, because it never
+read the instruction that said otherwise). `Glob` (list files by pattern) and
+`Grep` (search file contents by pattern) are both read-only discovery tools,
+not execution — added specifically to close this "guessed wrong, had no way
+to look further" gap on assignments with many source files or non-obvious
+filenames. `NotebookEdit` is Claude Code's built-in structured `.ipynb` cell
+editor (still no code execution) for `.ipynb` assignments, which the user
+confirmed come up regularly. Live-verified in an isolated test workspace: a
+task file was deliberately given a non-obvious name
+(`"Q7 Extra Notes (final).txt"`); Claude Code called
+`Glob({"pattern": "source-material/**"})`, found it in the listing, read the
+correct file, and produced the correct answer — confirming the discovery gap
+is closed. `DRAFT_PROMPT_TEMPLATE`'s "no way to run or execute anything"
+line and `run_claude_code`'s docstring updated to list the new tools.
+
 ---
 
 ## 5. `agent/graph/assignment_graph.py` — rewrite
@@ -1021,7 +1048,7 @@ acceptance criteria (per Decision #8, not in the original plan text):
 |---|---|
 | `agent/db/repo.py` | Add `get_claude_session`, `create_pending_item`, `get_pending_item`, `list_pending_items`, `close_pending_item` |
 | `agent/llm.py` | Add `respond_to_pending` intent + `pending_item_reference` arg; add `REVIEW_DECLARATION`/`parse_review_reply` |
-| `agent/graph/nodes/claude_code.py` | `run_claude_code` gains `resume_session_id`/`feedback` params, `REVISE_PROMPT_TEMPLATE`; **`DRAFT_PROMPT` rewritten** and the success check changed to require `submission/` + a valid `submission_manifest.json` instead of `draft.md` (Decision #8 — revises Phase 2 behavior). **Post-launch fix**: `--allowedTools` gains `Edit`; `DRAFT_PROMPT` → `DRAFT_PROMPT_TEMPLATE` + `_build_draft_prompt`/`student_info` param; `"output_name"` added to the manifest contract and its validation. **Post-launch fix (2)**: `_TOOLS` constant passed to both `--tools` and `--allowedTools` (no Bash — see `specs/sandboxed-bash-execution.md` for the rejected Bash investigation) so Claude Code never even attempts Bash instead of retrying a denied one; `_VALID_FORMATS` gains `"pptx"` |
+| `agent/graph/nodes/claude_code.py` | `run_claude_code` gains `resume_session_id`/`feedback` params, `REVISE_PROMPT_TEMPLATE`; **`DRAFT_PROMPT` rewritten** and the success check changed to require `submission/` + a valid `submission_manifest.json` instead of `draft.md` (Decision #8 — revises Phase 2 behavior). **Post-launch fix**: `--allowedTools` gains `Edit`; `DRAFT_PROMPT` → `DRAFT_PROMPT_TEMPLATE` + `_build_draft_prompt`/`student_info` param; `"output_name"` added to the manifest contract and its validation. **Post-launch fix (2)**: `_TOOLS` constant passed to both `--tools` and `--allowedTools` (no Bash — see `specs/sandboxed-bash-execution.md` for the rejected Bash investigation) so Claude Code never even attempts Bash instead of retrying a denied one; `_VALID_FORMATS` gains `"pptx"`. **Post-launch fix (6)**: `_TOOLS` gains `Glob`/`Grep` (read-only file/content discovery, closing a real "guessed the wrong filename, had no way to list the directory" failure) and `NotebookEdit` (structured `.ipynb` editing) — still no Bash |
 | `agent/graph/nodes/drive.py` | **Post-launch fix**: `ZIP_MIMETYPES` + a zip-extraction branch (with `_safe_extract` guarding against path traversal) in `resolve_attachment`, so `.zip` attachments are no longer silently marked unsupported |
 | `agent/graph/assignment_graph.py` | Add `revise_node`, `await_review_node`, `parse_review_node`, `ask_submit_node`, `await_submit_node`, `parse_submit_node`, `submission_prep_node`, `relay_submit_node`; extend `AssignmentState` (`submission_files`/`manifest`/`final_files`/`drive_links` replace `draft_path`/`final_docx_path`/`drive_link`); `relay_node` now sends N documents instead of one; `submission_prep_node` branches on the manifest's format (zip via stdlib `zipfile`, pdf/docx via Pandoc, as-is direct upload) instead of a fixed Pandoc-to-docx call. **Post-launch fix**: `relay_node` no longer sends WhatsApp documents — it uploads each submission file to Drive (via the existing `_upload_to_drive` helper) and sends their links in the summary text instead; `draft_node` forwards `configurable["student_info"]` to `run_claude_code`; `_package_submission` honors an optional manifest `output_name`. **Post-launch fix (2)**: `ingest_node`/`draft_node`/`revise_node` now explicitly clear `"failure_text": None` on every success return, so a stale failure from an earlier attempt on the same thread can no longer leak into `relay_node`'s failure check on a later, successful run |
 | `agent/graph/router_graph.py` | Add `_find_targeted_pending_item`, `handle_pending_item_reply`, `resolve_pending_item_node`, `handle_pending_item_disambiguation_node`; extend `route_entry_node`/`route_after_entry`/`route_after_classify`; guard `send_reply_node` against an absent `reply_text`. **Post-launch fix**: `run_assignment_flow` gains a `student_info` param, threaded into the assignment graph's own `configurable` dict; its one call site (in `handle_confirmation_node`) passes `configurable.get("student_info", "")` |

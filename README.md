@@ -19,6 +19,8 @@ Per-phase implementation specs: [`specs/`](specs/).
     plus web search — always shown to you before anything is finalized
   - Revise a draft, or approve it to move to submission
   - Draft and send email — **send always requires your explicit approval**
+  - Send `status` to check that Google access is still valid (the app also
+    checks at startup and messages you if it has expired)
 ## Architecture
 
 One long-running process:
@@ -104,7 +106,9 @@ Fill in every value in `.env`:
 
 Runs the OAuth consent flow in your browser and stores the resulting token in
 the `oauth_credentials` table. Re-run this if Google access ever expires and
-can't silently refresh (you'll get a WhatsApp message telling you to).
+can't silently refresh (you'll get a WhatsApp message telling you to — at
+app startup, or when a request needs Google — and you can send `status` any
+time to check).
 
 ## Running it
 

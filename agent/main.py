@@ -9,6 +9,7 @@ from google import genai
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import ConnectionPool
 
+from agent import google_auth
 from agent.config import load_settings
 from agent.graph.assignment_graph import build_assignment_graph
 from agent.graph.email_graph import build_email_graph
@@ -59,6 +60,19 @@ def create_app() -> FastAPI:
                     )
                 except Exception:
                     logger.exception("Failed to send crash-recovery heads-up for %s", name)
+
+            try:
+                with pool.connection() as conn:
+                    problem = google_auth.check_auth(conn)
+                if problem:
+                    await send_whatsapp_message(
+                        settings.meta_whatsapp_access_token,
+                        settings.meta_whatsapp_phone_number_id,
+                        settings.my_whatsapp_number,
+                        problem,
+                    )
+            except Exception:
+                logger.exception("Startup Google auth check failed")
 
             yield
 

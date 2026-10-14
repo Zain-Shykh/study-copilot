@@ -147,3 +147,24 @@ def test_bad_signature_returns_403():
     response = asyncio.run(run())
 
     assert response.status_code == 403
+
+
+def _status_reply(monkeypatch, problem):
+    app = _build_app()
+    monkeypatch.setattr(routes_module.repo, "mark_message_processed_if_new", lambda conn, mid: True)
+    monkeypatch.setattr(routes_module.google_auth, "check_auth", lambda conn: problem)
+    send_mock = AsyncMock(return_value="wamid.OUT1")
+    monkeypatch.setattr(routes_module, "send_whatsapp_message", send_mock)
+
+    asyncio.run(_post_and_drain(app, _text_message_payload(" Status ")))
+
+    app.state.graph.ainvoke.assert_not_awaited()
+    return send_mock.call_args[0][3]
+
+
+def test_status_reports_connected(monkeypatch):
+    assert _status_reply(monkeypatch, None) == "Google is connected."
+
+
+def test_status_reports_auth_problem(monkeypatch):
+    assert _status_reply(monkeypatch, "Google access has expired") == "Google access has expired"

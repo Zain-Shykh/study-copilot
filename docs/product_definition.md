@@ -6,11 +6,10 @@ answers questions about them on demand, and — with your explicit approval at e
 write step — can research, draft, and submit homework assignments.
 
 ## Interface
-- **Primary**: WhatsApp bot (Meta Cloud API), two entry points into the same
-  LangGraph app:
-  1. **User-initiated**: you send a message ("summarize my emails", "what's due?")
-  2. **Agent-initiated**: a scheduled job polls Gmail/Classroom and pushes a message
-     to you when something new shows up (new assignment, due-soon reminder, draft ready)
+- **Primary**: WhatsApp bot (Meta Cloud API) — you send a message ("summarize
+  my emails", "what's due?") and it is handled by the LangGraph app. The agent
+  never messages you unprompted, other than replies and a restart heads-up
+  (see Crash recovery).
 - **Why WhatsApp over Telegram/Discord**: Telegram and Discord are both
   blocked/throttled by major Pakistani ISPs, requiring a VPN to stay connected —
   a real reliability risk for something meant to notify you about due dates.
@@ -33,8 +32,6 @@ write step — can research, draft, and submit homework assignments.
 ### Gmail
 - Read and search inbox (recent, unread, by sender/subject/label) — on-demand
 - Summarize one email or a batch ("summarize my unread emails") — on-demand
-- Notify proactively with a batched digest of new mail since the last check,
-  across the whole inbox (see Agent behavior below for the checkpoint logic)
 - Draft replies/new emails — on-demand only
 - Send email — **approval required every time** (see Permission Matrix)
 
@@ -42,8 +39,6 @@ write step — can research, draft, and submit homework assignments.
 - List enrolled courses
 - List assignments: all, due-soon, overdue, or missing
 - Fetch assignment details + download attachments (via Drive) — on-demand only
-- Notify proactively when a new assignment posts, a new announcement posts,
-  or a due date approaches (see Agent behavior below for dedup rules)
 
 ### Web search
 - General-purpose research tool available to the drafting step
@@ -117,9 +112,9 @@ write step — can research, draft, and submit homework assignments.
    approve by replying with any affirmative free text — "yes", "send it",
    "approved" — parsed for intent, not a fixed keyword), implement the submit
    path as manual-link handoff (see Submission section above for why).
-4. **Phase 4 — Proactive mode**: scheduled polling job, run a few times a day
-   (e.g. morning/evening) rather than continuously, that messages you unprompted
-   about new/due assignments or ready drafts.
+4. **Phase 4 — Proactive mode** *(built, then removed)*: a scheduled polling
+   job that messaged you unprompted about new/due assignments and new mail.
+   Removed because it was not wanted; everything is now on-demand only.
 
 ---
 
@@ -164,49 +159,16 @@ drafts awaiting review), you can refer to the one you mean either way:
   currently pending items. Falls back to asking you to disambiguate only if
   the match is genuinely unclear (e.g. two pending items with very similar names).
 
-### Proactive vs on-demand actions
-Every action falls into exactly one of two trigger categories:
-
-- **Proactive (agent-initiated, fixed-interval polling — Phase 4)**: strictly
-  informational, never a write action. Covers: new Classroom assignments,
-  new Classroom announcements, due-soon/overdue reminders, and the email
-  digest (see below).
-- **On-demand only (never triggered automatically, only when you explicitly
-  ask)**: fetching/sharing full assignment details + attachments, starting to
-  draft an assignment ("work on this"), submitting an assignment, drafting or
-  sending an email. The agent never starts drafting or submitting work on its
-  own initiative just because something is due soon — a due-soon notification
-  is only ever a heads-up, not a trigger for action.
+### On-demand only
+The agent never acts or messages without being asked. Fetching/sharing full
+assignment details + attachments, starting to draft an assignment ("work on
+this"), submitting an assignment, and drafting or sending an email only ever
+happen when you explicitly ask. (The one exception is a heads-up after a
+process restart — see Crash recovery.)
 
 This is a separate axis from the Permission Matrix's Auto/Approval-required
 distinction: that axis governs whether a *requested* action needs your
 approval; this one governs whether the agent acts *without being asked* at all.
-
-### Proactive notification dedup
-Each assignment/announcement gets notified at most once per milestone, tracked
-in local state (not re-derived from Classroom each poll, so a milestone
-already sent never repeats even if the underlying due date/status is
-re-fetched):
-- Assignments: once when first seen (posted), once at a fixed lead time
-  before the due date (48h out), once if it becomes overdue.
-- Announcements: once when first seen (no due date, so no further milestones).
-
-### Email digest checkpoint
-The proactive email digest cannot rely on Gmail's unread flag as "what's new"
-— you read some emails directly in Gmail without the agent knowing, and old
-backlog mail can sit unread for weeks without being new. Instead the agent
-tracks its own checkpoint (last-seen timestamp or Gmail `historyId`) in local
-state, independent of read/unread status:
-- Each poll, it fetches only messages that arrived **after the last
-  checkpoint** — regardless of whether you've since read them or left them
-  unread — then advances the checkpoint.
-- Covers your whole inbox, unfiltered — no domain filtering, no category
-  filtering (promotions/social/spam included). Every new email since the last
-  checkpoint appears in the digest.
-- Old unread backlog is never re-reported, since it predates the checkpoint
-  from before the agent started tracking it.
-- Delivered as one batched digest per poll (brief one-liner per new email),
-  not a separate message per email.
 
 ### Assignment material ingestion
 Before Claude Code is invoked to draft, the main agent assembles everything
@@ -325,19 +287,12 @@ data. Beyond that, behavior depends on the failure type:
 - **Drafting failures** (Claude/web-search step errors while drafting an
   email or assignment response): reported as a failed draft, same as any
   on-demand failure — no partial/broken draft is ever sent for your review.
-- **Proactive poll-cycle failure** (a scheduled check itself fails, e.g.
-  Gmail/Classroom unreachable): after retries are exhausted, sends one
-  heads-up that the check failed and will retry next cycle — not a guess
-  that "nothing new" happened. Deduplicated like the assignment milestones:
-  only one failure notification per ongoing outage, not one every poll cycle,
-  with a follow-up once checks succeed again.
-
 ---
 
 ## Decisions (locked)
-1. **Hosting**: your own computer, left running. The scheduler and WhatsApp bot
-   process run locally — no cloud deployment for v1. (Trade-off: if the machine is
-   off/asleep, the bot goes quiet and scheduled checks are skipped until it's back up.)
+1. **Hosting**: your own computer, left running. The WhatsApp bot
+   process runs locally — no cloud deployment for v1. (Trade-off: if the machine is
+   off/asleep, the bot goes quiet until it's back up.)
 2. **Email autonomy**: every send is approval-gated, no exceptions. There is no
    auto-send path anywhere in the design — the "Auto" rows in the permission matrix
    above stop at reading/drafting; sending is always a human click.
@@ -381,21 +336,14 @@ data. Beyond that, behavior depends on the failure type:
    persistent state — LangGraph's own approval/interrupt checkpoints (via
    `langgraph-checkpoint-postgres`, so a pending approval survives a machine
    restart instead of being silently lost), plus app-specific tracking:
-   notification dedup milestones, the Gmail digest checkpoint (`historyId`),
-   and Claude Code session IDs per assignment. **Already installed and running**
+   Claude Code session IDs per assignment. **Already installed and running**
    on this machine (PostgreSQL 16, `main` cluster on port 5432) — no `apt
    install` needed; only a project-specific database/role still needs creating.
-8. **Scheduler**: the Phase 4 polling job runs **in-process**, inside the
-   same long-running Python program that hosts the WhatsApp webhook server
-   (e.g. via APScheduler) — one process to run and monitor, rather than a
-   separate cron-triggered script. Trade-off accepted: a crash/hang in the
-   webhook handling path also takes down the scheduled Gmail/Classroom
-   checks until the process is restarted.
-9. **Drafting concurrency**: only one Claude Code headless session runs at a
+8. **Drafting concurrency**: only one Claude Code headless session runs at a
    time. If you ask to work on a second assignment before the first draft is
    done, the request queues and starts once the first finishes — avoids two
    headless sessions competing for your Pro/Max login/usage limits at once.
-10. **Secrets storage**: OAuth tokens and API keys (Google, Meta) live in a
+9. **Secrets storage**: OAuth tokens and API keys (Google, Meta) live in a
     local `.env`/config file on disk, readable only by your user account —
     matches the single-user, own-computer trust model already locked in above;
     no OS keychain/secret-manager layer for v1.
@@ -451,14 +399,10 @@ data. Beyond that, behavior depends on the failure type:
 - `pypandoc` — thin Python wrapper around the Pandoc binary, instead of
   hand-rolling subprocess calls
 
-### Scheduler
-- `APScheduler` — in-process, fires the Gmail/Classroom polling job a few
-  times a day inside the same long-running program as the webhook server
-
 ### Database
 - **PostgreSQL** (`sudo apt install -y postgresql`) — single local instance,
-  holds LangGraph's checkpoints plus app-specific tables (dedup milestones,
-  Gmail digest checkpoint, Claude Code session IDs per assignment)
+  holds LangGraph's checkpoints plus app-specific tables (Claude Code session IDs per
+  assignment, pending items, OAuth credentials)
 - Plain `psycopg` for the small number of app-specific tables — no ORM
   (SQLAlchemy, etc.) given the scope is a handful of simple tables, not worth
   the extra abstraction
@@ -500,18 +444,7 @@ ngrok (static domain) ──► FastAPI webhook route ──► LangGraph app
 
                                               PostgreSQL
                                     (LangGraph checkpoints + app-state tables)
-
-APScheduler (same process, separate from LangGraph)
-   └─► poll_gmail_job / poll_classroom_job — plain async functions sharing
-       the same Google API clients, Postgres pool, and WhatsApp-send helper
 ```
-The scheduler is deliberately **not** routed through LangGraph. Proactive
-checks (per the Proactive vs on-demand decision above) are always read-only,
-single-shot, and never need approval or multi-turn state — forcing them
-through the graph/interrupt machinery would add nothing. They're plain
-functions that read/write the same Postgres tables and call the same
-Google-API/WhatsApp helpers the graph nodes use, to avoid duplicating that
-logic in two places.
 
 ### LangGraph thread model
 LangGraph persists state per `thread_id` via the Postgres checkpointer — the
@@ -573,23 +506,19 @@ a draft/notification message. On an inbound reply:
 ### Drafting concurrency in practice
 The one-at-a-time Claude Code rule is enforced with a plain in-process
 `asyncio.Lock` around the "invoke Claude Code" step — not a Postgres
-advisory lock — because the scheduler decision already accepted that a
-process restart requires re-triggering in-flight work manually; adding
+advisory lock — because a process restart is already accepted as requiring
+re-triggering in-flight work manually; adding
 cross-restart lock durability here would be inconsistent with that.
 
 ### Database (app-specific tables, alongside LangGraph's own checkpoint tables)
 - `pending_items` — see above
-- `email_checkpoint` (single row: `last_history_id`, `updated_at`) — the
-  Gmail digest checkpoint
-- `notified_milestones` (`course_id`, `coursework_id`, `milestone_type`,
-  `notified_at`) — assignment/announcement notification dedup
 - `claude_sessions` (`assignment_thread_id`, `claude_session_id`,
   `updated_at`) — session ID to `--resume`, per assignment
 
 ### Module layout
 ```
 agent/
-  main.py                  # FastAPI app, mounts webhook route, starts APScheduler
+  main.py                  # FastAPI app, mounts webhook route
   config.py                # loads .env
   webhook/routes.py        # verifies Meta signature, parses payload, invokes LangGraph
   graph/
@@ -602,9 +531,8 @@ agent/
       ingestion.py                          # attachment resolution + Pandoc + fail-fast
       claude_code.py                        # subprocess wrapper (new/--resume)
       whatsapp_send.py                      # composes + sends via Graph API
-  scheduler/jobs.py         # poll_gmail_job, poll_classroom_job — plain functions
   db/
-    schema.sql               # pending_items, email_checkpoint, notified_milestones, claude_sessions
+    schema.sql               # pending_items, claude_sessions, oauth_credentials, processed_messages
     repo.py                   # thin data-access functions (psycopg)
   workspace/paths.py         # ~/agent-workspace/<course>/<assignment>/ path helpers
 ```

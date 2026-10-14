@@ -6,10 +6,9 @@ rules.
 
 ## 1. High-level system architecture
 
-One long-running process with two independent halves — a webhook path that
-answers on-demand messages, and a scheduler that proactively checks Gmail
-and Classroom. Both share the same Postgres pool, Google API clients, and
-WhatsApp-send helper.
+One long-running process — a webhook path that answers on-demand messages
+and drives the LangGraph graphs. Everything shares the same Postgres pool,
+Google API clients, and WhatsApp-send helper.
 
 ```mermaid
 flowchart TB
@@ -28,35 +27,29 @@ flowchart TB
         HOOK["Webhook route<br/>agent/webhook/routes.py"]
         ROUTER["Router Graph<br/>(LangGraph)"]
         ASSIGN["Assignment Graph<br/>(LangGraph, one instance<br/>per in-flight assignment)"]
-        SCHED["APScheduler<br/>agent/scheduler/jobs.py<br/>fires 08:00 / 20:00"]
 
         NGROK --> HOOK
         HOOK --> ROUTER
         ROUTER -. "asyncio.create_task<br/>(fire-and-forget)" .-> ASSIGN
     end
 
-    PG[("PostgreSQL<br/>— LangGraph checkpoints (per thread_id)<br/>— pending_items (reply routing)<br/>— oauth_credentials<br/>— email_checkpoint<br/>— notified_milestones<br/>— claude_sessions<br/>— processed_messages (webhook dedup)")]
+    PG[("PostgreSQL<br/>— LangGraph checkpoints (per thread_id)<br/>— pending_items (reply routing)<br/>— oauth_credentials<br/>— claude_sessions<br/>— processed_messages (webhook dedup)")]
 
     ROUTER <--> PG
     ASSIGN <--> PG
-    SCHED <--> PG
 
     ROUTER --> GAPI
     ROUTER --> GEM
     ASSIGN --> GAPI
     ASSIGN --> CC
-    SCHED --> GAPI
 
     ROUTER -- "send reply" --> WA
     ASSIGN -- "send draft / result" --> WA
-    SCHED -- "send digest / notification" --> WA
 ```
 
-**Why it's split this way:** proactive checks are always read-only and
-never need approval, so they deliberately bypass LangGraph entirely —
-plain async functions, not graph nodes. Everything that can *write*
-(send email, submit an assignment) only ever happens inside the LangGraph
-graphs, gated behind explicit `interrupt()` approval pauses.
+**Write safety:** everything that can *write* (send email, submit an
+assignment) only ever happens inside the LangGraph graphs, gated behind
+explicit `interrupt()` approval pauses.
 
 ## 2. Router graph — as implemented today
 

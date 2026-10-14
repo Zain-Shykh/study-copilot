@@ -1,11 +1,9 @@
-"""FastAPI app entrypoint — mounts the webhook route and starts APScheduler."""
+"""FastAPI app entrypoint — mounts the webhook route."""
 
 import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 from google import genai
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -17,12 +15,9 @@ from agent.graph.email_graph import build_email_graph
 from agent.graph.nodes.whatsapp_send import send_whatsapp_message
 from agent.graph.recovery import scan_for_interrupted_threads
 from agent.graph.router_graph import build_router_graph
-from agent.scheduler.jobs import poll_classroom_job, poll_gmail_job
 from agent.webhook.routes import router as webhook_router
 
 logger = logging.getLogger(__name__)
-
-_POLL_HOURS = "8,20"  # 08:00/20:00 local time, hardcoded
 
 
 def create_app() -> FastAPI:
@@ -31,8 +26,7 @@ def create_app() -> FastAPI:
     router + assignment graphs for the webhook route to use. Also sets up
     the background-task registry that keeps in-flight assignment runs alive
     (asyncio.create_task results must be referenced somewhere or they can
-    be garbage-collected mid-run). Also starts an AsyncIOScheduler running
-    the twice-daily Gmail/Classroom proactive-poll jobs.
+    be garbage-collected mid-run).
     """
     settings = load_settings()
 
@@ -66,35 +60,7 @@ def create_app() -> FastAPI:
                 except Exception:
                     logger.exception("Failed to send crash-recovery heads-up for %s", name)
 
-            scheduler = AsyncIOScheduler()
-            scheduler.add_job(
-                poll_gmail_job,
-                CronTrigger(hour=_POLL_HOURS),
-                args=[
-                    pool,
-                    app.state.genai_client,
-                    settings.gemini_model,
-                    settings.meta_whatsapp_access_token,
-                    settings.meta_whatsapp_phone_number_id,
-                    settings.my_whatsapp_number,
-                ],
-            )
-            scheduler.add_job(
-                poll_classroom_job,
-                CronTrigger(hour=_POLL_HOURS),
-                args=[
-                    pool,
-                    settings.meta_whatsapp_access_token,
-                    settings.meta_whatsapp_phone_number_id,
-                    settings.my_whatsapp_number,
-                ],
-            )
-            scheduler.start()
-            app.state.scheduler = scheduler
-
             yield
-
-            scheduler.shutdown(wait=False)
 
         pool.close()
 

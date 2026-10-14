@@ -87,17 +87,11 @@ No linter or formatter is configured yet.
 
 ## Architecture
 
-The process runs two structurally separate halves in one long-running program:
+The process is one long-running program:
 
-1. **Answering the user** — a FastAPI webhook (`agent/webhook/routes.py`) receives
+- **Answering the user** — a FastAPI webhook (`agent/webhook/routes.py`) receives
    Meta's WhatsApp callbacks (exposed via an ngrok static domain) and hands
    messages to a **LangGraph** app.
-2. **Watching things proactively** — an in-process **APScheduler** job
-   (`agent/scheduler/jobs.py`) fires a few times a day to check Gmail/Classroom and
-   push notifications. This deliberately bypasses LangGraph entirely: proactive
-   checks are always read-only, single-shot, and never need approval, so they're
-   plain async functions that share the same Google API clients, Postgres pool,
-   and WhatsApp-send helper as the graph nodes — not routed through interrupts.
 
 ### LangGraph thread model
 
@@ -156,21 +150,12 @@ what succeeded).
 ### Database
 
 One local Postgres instance holds LangGraph's own checkpoint tables
-(`langgraph-checkpoint-postgres`) plus six app-specific tables defined in
-`agent/db/schema.sql`: `pending_items` (reply routing), `email_checkpoint`
-(Gmail digest watermark — see below), `notified_milestones` (proactive
-notification dedup), `claude_sessions` (assignment thread → Claude Code session
+(`langgraph-checkpoint-postgres`) plus four app-specific tables defined in
+`agent/db/schema.sql`: `pending_items` (reply routing), `claude_sessions` (assignment thread → Claude Code session
 ID, for `--resume`), `oauth_credentials` (stored Google OAuth token), and
 `processed_messages` (webhook delivery dedup — see "Error handling" below).
 No ORM — plain `psycopg` via `agent/db/repo.py`, given the small number of
 simple tables.
-
-### Gmail digest checkpoint
-
-The proactive email digest cannot use Gmail's unread flag as "what's new" (the
-user reads mail outside the agent, and old backlog can sit unread indefinitely).
-Instead it tracks its own watermark (`email_checkpoint.last_history_id`) and only
-reports messages that arrived after it, regardless of read/unread state.
 
 ### Error handling
 

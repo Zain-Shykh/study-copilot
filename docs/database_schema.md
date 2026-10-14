@@ -38,44 +38,6 @@ the message text.
 
 ---
 
-## `email_checkpoint`
-
-Single-row table tracking the watermark for the proactive Gmail digest —
-deliberately independent of Gmail's own read/unread flag (see "Email digest
-checkpoint" in the spec for why).
-
-| Column             | Type          | Notes                                        |
-|----------------------|---------------|-------------------------------------------------|
-| `id`                   | `TEXT`         | **Primary key.** Always `'singleton'` — enforces one row. |
-| `last_history_id`       | `TEXT`         | Gmail's `historyId` as of the last successful poll. |
-| `updated_at`             | `TIMESTAMPTZ`  | Defaults to `now()`.                             |
-
-**Written**: after each successful `poll_gmail_job` run, advanced to the newest
-`historyId` seen.
-**Read**: at the start of each `poll_gmail_job` run, to fetch only messages
-newer than the watermark.
-
----
-
-## `notified_milestones`
-
-Tracks which proactive Classroom notifications have already fired, so a
-milestone is never re-sent (see "Proactive notification dedup" in the spec).
-
-| Column             | Type          | Notes                                                      |
-|----------------------|---------------|----------------------------------------------------------------|
-| `course_id`            | `TEXT`         | Classroom course ID.                                            |
-| `coursework_id`         | `TEXT`         | Classroom coursework (assignment/announcement) ID.               |
-| `milestone_type`        | `TEXT`         | e.g. `'posted'`, `'due_soon'`, `'overdue'`.                       |
-| `notified_at`            | `TIMESTAMPTZ`  | Defaults to `now()`.                                             |
-| —                        |               | **Primary key**: (`coursework_id`, `milestone_type`) — one row per milestone per item, ever. |
-
-**Written**: the moment a milestone notification is sent.
-**Read**: at the start of each `poll_classroom_job` run, to decide which
-milestones (if any) are still due for a given assignment/announcement.
-
----
-
 ## `claude_sessions`
 
 Maps an assignment's LangGraph thread to its Claude Code session ID, so
@@ -134,7 +96,7 @@ already seen and the delivery is a no-op.
 
 ## Notes
 
-- All six tables use `TEXT` for IDs rather than typed foreign keys — there's no
+- All four tables use `TEXT` for IDs rather than typed foreign keys — there's no
   formal relationship to LangGraph's own checkpoint tables (different package,
   different schema), so IDs are just matched by convention (e.g.
   `claude_sessions.assignment_thread_id` is the same string as the LangGraph

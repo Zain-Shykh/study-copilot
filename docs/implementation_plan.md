@@ -241,48 +241,14 @@ Gmail, rejecting discards it, revising regenerates it, with its own
 
 ---
 
-## Phase 4 — Proactive mode
+## Phase 4 — Proactive mode (built, then removed)
 
-### Objective
-A scheduled polling job, running a few times a day (not continuously), that
-messages you unprompted about new/due assignments, new announcements, or the
-email digest — strictly informational, layered on top of everything already
-built in Phases 1–3.
-
-### Core requirements
-- APScheduler configured in-process, alongside the webhook server, firing a
-  few times a day (e.g. morning/evening).
-- `poll_gmail_job`: reads `email_checkpoint.last_history_id`, fetches only
-  messages newer than it (inbox-wide, unfiltered, independent of read/unread
-  status), sends one batched digest, advances the checkpoint.
-- `poll_classroom_job`: for each enrolled course, checks assignments/
-  announcements against `notified_milestones` and sends any milestone not yet
-  notified (posted / due-soon at 48h / overdue for assignments; posted only
-  for announcements), recording each one sent.
-- Proactive poll-cycle failure handling: retry with backoff, then a single
-  deduplicated "check failed, will retry" notification per ongoing outage,
-  with a follow-up once checks succeed again.
-- These jobs are plain async functions — not LangGraph nodes or threads —
-  sharing the same Google API clients, Postgres pool, and WhatsApp-send
-  helper as the graph nodes.
-
-### Out of scope
-Any new write/approval-gated action — this phase only adds notifications on
-top of the drafting/submission flow already built.
-
-### Acceptance criteria
-- A new assignment posted in Classroom produces exactly one "posted"
-  notification at the next poll, never repeating on later polls.
-- An assignment due within 48 hours produces exactly one "due soon"
-  notification, once, regardless of how many subsequent polls occur before
-  the due date.
-- New emails since the last check arrive as a single batched digest;
-  previously-seen unread backlog is never re-reported.
-- Simulating an outage across two consecutive Gmail/Classroom poll cycles
-  produces exactly one failure notification, not two, followed by a recovery
-  notice once checks succeed again.
-- No proactively-sent message ever requests approval or triggers a write
-  action on its own.
+A twice-daily APScheduler polling job (Gmail digest + Classroom milestone
+notifications) was implemented and later removed at the user's request. The
+app is now on-demand only. Removed: `agent/scheduler/`, the `apscheduler`
+dependency, the `email_checkpoint` and `notified_milestones` tables, and
+their `repo.py`/`gmail.py`/`llm.py` helpers (`summarize_emails`,
+`get_current_history_id`, `get_new_message_ids`, `get_messages_by_id`).
 
 ---
 

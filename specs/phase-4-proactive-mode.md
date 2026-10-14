@@ -1,3 +1,5 @@
+> **REMOVED:** this phase was implemented and later removed at the user's request. The code, tables and dependency described below no longer exist; kept for history only.
+
 # Phase 4 — Proactive Mode — Spec
 
 Source: `docs/implementation_plan.md` ("Phase 4"), `docs/product_definition.md`

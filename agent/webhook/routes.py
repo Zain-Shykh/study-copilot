@@ -17,6 +17,7 @@ import logging
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import PlainTextResponse
 
+from agent import google_auth
 from agent.db import repo
 from agent.graph.nodes.whatsapp_send import send_whatsapp_message
 
@@ -74,6 +75,11 @@ async def _process_text_message(
     enough for Meta to treat it as timed out and redeliver the message."""
     settings = request.app.state.settings
     try:
+        if text.strip().lower() == "status":
+            with request.app.state.pool.connection() as conn:
+                problem = google_auth.check_auth(conn)
+            await _send_reply(request, sender, problem or "Google is connected.")
+            return
         graph = request.app.state.graph
         await graph.ainvoke(
             {

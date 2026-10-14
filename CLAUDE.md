@@ -173,3 +173,9 @@ already has its checkpoint). A thread killed mid-node (e.g. Claude Code
 subprocess still running) is not — the intended fix is a startup scan for threads
 stuck mid-execution that surfaces them to the user rather than leaving them stuck
 silently (see "Crash recovery" in the spec).
+
+Google auth expiry is surfaced three ways: any Google call that fails with a dead
+refresh token replies with `NOT_AUTHENTICATED_MESSAGE`; startup (`agent/main.py`)
+messages you if the stored credentials are dead; and sending exactly `status`
+(handled in `agent/webhook/routes.py` before the graph, no Gemini) reports
+whether Google is connected. All use `google_auth.check_auth`.

@@ -69,3 +69,10 @@ def load_google_clients(conn: psycopg.Connection) -> tuple[Resource, Resource, R
         return get_google_clients(conn)
     except (RuntimeError, RefreshError):
         return NOT_AUTHENTICATED_MESSAGE
+
+
+def check_auth(conn: psycopg.Connection) -> str | None:
+    """None if the stored Google credentials are usable (refreshing them if
+    needed), else the user-facing problem text."""
+    result = load_google_clients(conn)
+    return result if isinstance(result, str) else None

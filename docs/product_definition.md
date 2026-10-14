@@ -8,8 +8,8 @@ write step — can research, draft, and submit homework assignments.
 ## Interface
 - **Primary**: WhatsApp bot (Meta Cloud API) — you send a message ("summarize
   my emails", "what's due?") and it is handled by the LangGraph app. The agent
-  never messages you unprompted, other than replies and a restart heads-up
-  (see Crash recovery).
+  never messages you unprompted, other than replies, a restart heads-up
+  (see Crash recovery), and a startup warning if Google access has expired.
 - **Why WhatsApp over Telegram/Discord**: Telegram and Discord are both
   blocked/throttled by major Pakistani ISPs, requiring a VPN to stay connected —
   a real reliability risk for something meant to notify you about due dates.
@@ -163,8 +163,9 @@ drafts awaiting review), you can refer to the one you mean either way:
 The agent never acts or messages without being asked. Fetching/sharing full
 assignment details + attachments, starting to draft an assignment ("work on
 this"), submitting an assignment, and drafting or sending an email only ever
-happen when you explicitly ask. (The one exception is a heads-up after a
-process restart — see Crash recovery.)
+happen when you explicitly ask. (The exceptions are a heads-up after a
+process restart — see Crash recovery — and a warning at startup if Google
+access has expired.)
 
 This is a separate axis from the Permission Matrix's Auto/Approval-required
 distinction: that axis governs whether a *requested* action needs your
@@ -276,7 +277,11 @@ data. Beyond that, behavior depends on the failure type:
   auto-retried — retrying a bad token just burns your rate limit for no
   reason. Surfaced immediately, naming which account/service needs
   re-authentication (e.g. "Classroom access has expired — please
-  re-authenticate.").
+  re-authenticate."). Because nothing else tells you ahead of time, the app
+  also checks the stored Google credentials once at startup (messaging you
+  only if they're dead) and on demand when you send the exact message
+  `status` (replies "Google is connected." or the re-authentication
+  message). `status` is matched deterministically, not routed through Gemini.
 - **On-demand command failure** (you asked for something right now and it
   failed after retries): agent tells you plainly what failed and why, in one
   message, without silently retrying forever or guessing. You decide whether

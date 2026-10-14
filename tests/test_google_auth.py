@@ -132,3 +132,15 @@ class TestLoadGoogleClients:
         result = google_auth.load_google_clients(MagicMock())
 
         assert result == google_auth.NOT_AUTHENTICATED_MESSAGE
+
+
+class TestCheckAuth:
+    def test_none_when_clients_load(self, monkeypatch):
+        monkeypatch.setattr(google_auth, "load_google_clients", lambda conn: ("g", "c", "d"))
+
+        assert google_auth.check_auth(MagicMock()) is None
+
+    def test_returns_problem_text_when_not_authenticated(self, monkeypatch):
+        monkeypatch.setattr(google_auth, "load_google_clients", lambda conn: google_auth.NOT_AUTHENTICATED_MESSAGE)
+
+        assert google_auth.check_auth(MagicMock()) == google_auth.NOT_AUTHENTICATED_MESSAGE

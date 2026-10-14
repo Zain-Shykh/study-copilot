@@ -181,14 +181,6 @@ def answer_question(
         raise RuntimeError("answer_question: model produced no final text")
     return response.text
 
-SUMMARIZE_SYSTEM_PROMPT = """\
-You write concise, formal email digests for a personal assistant app. Given \
-a list of emails (From/Subject/Date/snippet), produce one short line per \
-email summarizing what it's about. Be factual — do not invent details not \
-present in the snippet. Structured, no preamble, no closing remarks.
-"""
-
-
 def _retry_model(fn: Callable[[str], object], model: str):
     """Calls fn(model) up to _MAX_ATTEMPTS times with exponential backoff.
     Raises the last error once attempts are exhausted."""
@@ -243,33 +235,6 @@ def classify_intent(client: genai.Client, model: str, text: str) -> tuple[str, d
     call_ = response.function_calls[0]
     args = dict(call_.args or {})
     return args.pop("intent"), args
-
-
-@traceable(run_type="llm", name="summarize_emails", process_inputs=_drop_client)
-def summarize_emails(client: genai.Client, model: str, emails: list[dict]) -> str:
-    """Returns a concise digest of the given emails as plain text. Raises
-    after 3 failed attempts."""
-    lines = []
-    for email in emails:
-        lines.append(
-            f"From: {email.get('from', '')}\n"
-            f"Subject: {email.get('subject', '')}\n"
-            f"Date: {email.get('date', '')}\n"
-            f"Snippet: {email.get('snippet', '')}"
-        )
-    content = "\n\n".join(lines)
-
-    def call(model):
-        return client.models.generate_content(
-            model=model,
-            contents=content,
-            config=types.GenerateContentConfig(
-                system_instruction=SUMMARIZE_SYSTEM_PROMPT,
-            ),
-        )
-
-    response = _with_retry(call, model)
-    return response.text
 
 
 CONFIRM_DECLARATION = types.FunctionDeclaration(

@@ -19,25 +19,14 @@ Per-phase implementation specs: [`specs/`](specs/).
     plus web search — always shown to you before anything is finalized
   - Revise a draft, or approve it to move to submission
   - Draft and send email — **send always requires your explicit approval**
-- **Proactively (no message from you needed):**
-  - Twice a day (08:00 / 20:00), polls Gmail for new mail since the last
-    check and pushes a batched digest
-  - Polls Classroom for new assignments, new announcements, and due-soon/overdue
-    items, and notifies once per item (deduplicated)
-  - Never performs a write or requires approval — proactive checks are
-    strictly read-only
-
 ## Architecture
 
-One long-running process with two independent halves:
+One long-running process:
 
-1. **Answering the user** — a FastAPI webhook (`agent/webhook/routes.py`)
+- **Answering the user** — a FastAPI webhook (`agent/webhook/routes.py`)
    receives Meta WhatsApp callbacks (exposed via an ngrok tunnel) and routes
    them into a **LangGraph** app. State is checkpointed per-thread in
    Postgres, which is what lets an approval step survive a process restart.
-2. **Watching things proactively** — an in-process **APScheduler** job
-   (`agent/scheduler/jobs.py`) runs the read-only Gmail/Classroom polls
-   directly, bypassing LangGraph entirely (no approval needed).
 
 Assignment drafting is delegated to the `claude` CLI running headless
 (`agent/graph/nodes/claude_code.py`), sandboxed to one assignment's own
@@ -84,9 +73,8 @@ sudo -u postgres createdb local_agent --owner local_agent_app
 psql "postgresql://local_agent_app:<password>@localhost:5432/local_agent" -f agent/db/schema.sql
 ```
 
-This creates the app's six tables (`pending_items`, `email_checkpoint`,
-`notified_milestones`, `claude_sessions`, `oauth_credentials`,
-`processed_messages`). LangGraph's own checkpoint tables are created
+This creates the app's four tables (`pending_items`, `claude_sessions`,
+`oauth_credentials`, `processed_messages`). LangGraph's own checkpoint tables are created
 automatically on first app startup.
 
 ### 3. Configure secrets
@@ -134,8 +122,7 @@ ngrok http --url=<your NGROK_STATIC_DOMAIN> 8000
 .venv/bin/uvicorn agent.main:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
-Starts the webhook server and the twice-daily proactive-poll scheduler in
-one process.
+Starts the webhook server.
 
 **One-time — point Meta at the tunnel:** in the Meta developer app dashboard
 → WhatsApp → Configuration, set the webhook URL to

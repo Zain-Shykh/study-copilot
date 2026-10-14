@@ -43,49 +43,6 @@ def list_messages(gmail_service, query: str, max_results: int) -> list[dict]:
     return [_get_message_metadata(gmail_service, ref["id"]) for ref in response.get("messages", [])]
 
 
-def get_current_history_id(gmail_service) -> str:
-    """Current historyId — used both to establish/reset the checkpoint
-    baseline and to advance it after a successful poll."""
-    return gmail_service.users().getProfile(userId="me").execute(num_retries=3)["historyId"]
-
-
-def get_new_message_ids(gmail_service, start_history_id: str) -> list[str] | None:
-    """Message ids added since start_history_id (deduped — the same
-    message can appear in multiple history records), or None if Gmail
-    reports 404 (checkpoint too old/expired; caller re-baselines instead
-    of treating this as a failure)."""
-    message_ids: set[str] = set()
-    page_token = None
-    try:
-        while True:
-            response = (
-                gmail_service.users()
-                .history()
-                .list(
-                    userId="me",
-                    startHistoryId=start_history_id,
-                    historyTypes=["messageAdded"],
-                    pageToken=page_token,
-                )
-                .execute(num_retries=3)
-            )
-            for record in response.get("history", []):
-                for added in record.get("messagesAdded", []):
-                    message_ids.add(added["message"]["id"])
-            page_token = response.get("nextPageToken")
-            if not page_token:
-                break
-    except HttpError as e:
-        if e.resp.status == 404:
-            return None
-        raise
-    return list(message_ids)
-
-
-def get_messages_by_id(gmail_service, message_ids: list[str]) -> list[dict]:
-    return [_get_message_metadata(gmail_service, mid) for mid in message_ids]
-
-
 def _date_to_epoch_seconds(date_str: str) -> int:
     """Converts a "YYYY-MM-DD" calendar date to the Unix timestamp of that
     date's midnight in USER_TIMEZONE. Gmail's after:/before: search

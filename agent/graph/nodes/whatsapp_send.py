@@ -1,11 +1,21 @@
 """Composes and sends messages via the Meta Graph API."""
 
+import logging
 import mimetypes
 from pathlib import Path
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
 GRAPH_API_VERSION = "v21.0"
+
+
+def _log_if_error(response: httpx.Response, step: str) -> None:
+    """Meta's error JSON explains *why* a send failed; raise_for_status()
+    alone discards it. Contains no secrets."""
+    if response.is_error:
+        logger.error("whatsapp %s failed status=%s body=%s", step, response.status_code, response.text[:500])
 
 
 async def send_whatsapp_message(
@@ -29,8 +39,11 @@ async def send_whatsapp_message(
             },
             timeout=10,
         )
+    _log_if_error(response, "send")
     response.raise_for_status()
-    return response.json()["messages"][0]["id"]
+    message_id = response.json()["messages"][0]["id"]
+    logger.info("whatsapp text sent to=***%s chars=%d id=%s", to[-4:], len(body), message_id)
+    return message_id
 
 
 async def send_whatsapp_document(
@@ -61,6 +74,7 @@ async def send_whatsapp_document(
             files={"file": (display_name, file_path.read_bytes(), mime_type)},
             timeout=30,
         )
+        _log_if_error(upload_response, "media upload")
         upload_response.raise_for_status()
         media_id = upload_response.json()["id"]
 
@@ -79,5 +93,8 @@ async def send_whatsapp_document(
             },
             timeout=10,
         )
+    _log_if_error(send_response, "document send")
     send_response.raise_for_status()
-    return send_response.json()["messages"][0]["id"]
+    message_id = send_response.json()["messages"][0]["id"]
+    logger.info("whatsapp document sent to=***%s filename=%s id=%s", to[-4:], display_name, message_id)
+    return message_id

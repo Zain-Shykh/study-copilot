@@ -13,6 +13,8 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import time
+import uuid
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import PlainTextResponse
@@ -20,6 +22,7 @@ from fastapi.responses import PlainTextResponse
 from agent import google_auth
 from agent.db import repo
 from agent.graph.nodes.whatsapp_send import send_whatsapp_message
+from agent.logging_setup import request_id_var
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,11 @@ def verify_webhook(request: Request) -> PlainTextResponse:
     if mode == "subscribe" and verify_token == settings.meta_webhook_verify_token:
         return PlainTextResponse(challenge, status_code=200)
     return PlainTextResponse("", status_code=403)
+
+
+def _mask(number: str) -> str:
+    """Last 4 digits only — full phone numbers never go in logs."""
+    return number[-4:]
 
 
 def _verify_signature(app_secret: str, raw_body: bytes, header_value: str | None) -> bool:
@@ -74,10 +82,13 @@ async def _process_text_message(
     slow tool-calling loop can't make the webhook handler itself slow
     enough for Meta to treat it as timed out and redeliver the message."""
     settings = request.app.state.settings
+    start = time.monotonic()
+    logger.info("turn started thread_id=user:***%s", _mask(sender))
     try:
         if text.strip().lower() == "status":
             with request.app.state.pool.connection() as conn:
                 problem = google_auth.check_auth(conn)
+            logger.info("status check: %s", problem or "connected")
             await _send_reply(request, sender, problem or "Google is connected.")
             return
         graph = request.app.state.graph
@@ -108,6 +119,8 @@ async def _process_text_message(
         # nodes) — an actual bug.
         logger.exception("Unhandled error processing inbound WhatsApp message")
         await _send_reply(request, sender, "Something went wrong handling that — please try again.")
+    finally:
+        logger.info("turn finished in %.2fs", time.monotonic() - start)
 
 
 def _dispatch_background(request: Request, coro) -> None:
@@ -124,6 +137,7 @@ async def receive_webhook(request: Request) -> Response:
 
     signature = request.headers.get("X-Hub-Signature-256")
     if not _verify_signature(settings.meta_app_secret, raw_body, signature):
+        logger.warning("invalid webhook signature")
         return Response(status_code=403)
 
     payload = await request.json()
@@ -144,15 +158,25 @@ async def receive_webhook(request: Request) -> Response:
     if sender != settings.my_whatsapp_number:
         # Single-user product — Meta's test number isn't public, so a
         # message from anyone else is silently ignored, not an error.
+        logger.warning("ignored message from non-owner sender ***%s", _mask(sender))
         return Response(status_code=200)
 
     msg_id = message["id"]
+    request_id_var.set(uuid.uuid4().hex[:8])
+    logger.info(
+        "inbound message wamid=%s type=%s reply_to=%s chars=%d",
+        msg_id,
+        message.get("type"),
+        message.get("context", {}).get("id"),
+        len(message.get("text", {}).get("body", "")),
+    )
     with request.app.state.pool.connection() as conn:
         is_new = repo.mark_message_processed_if_new(conn, msg_id)
     if not is_new:
         # A redelivery of a message we already handled — ack and do
         # nothing further, rather than re-running the turn and sending a
         # second, independently-worded reply.
+        logger.info("duplicate delivery ignored wamid=%s", msg_id)
         return Response(status_code=200)
 
     if message.get("type") != "text":

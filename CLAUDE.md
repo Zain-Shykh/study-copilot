@@ -157,6 +157,21 @@ ID, for `--resume`), `oauth_credentials` (stored Google OAuth token), and
 No ORM — plain `psycopg` via `agent/db/repo.py`, given the small number of
 simple tables.
 
+### Logging
+
+`agent/logging_setup.py` configures logging once, from `create_app()`: console
+plus a rotating `logs/app.log` (5 MB × 5), configured by `LOG_LEVEL`,
+`LOG_FORMAT` (`text`|`json`) and `LOG_DIR`. Every line carries a request id —
+a `ContextVar` set per inbound webhook message and inherited by the
+background tasks (`asyncio.create_task` copies context). Every graph node is
+wrapped with `log_node` at `add_node`, which logs duration, logs failures with
+a traceback and re-raises, and treats LangGraph's interrupt as "paused", not an
+error. Rules for any new log line: never log message text, email
+subjects/bodies/addresses, titles, tokens, or full phone numbers (IDs, lengths,
+counts and last-4 digits only), use lazy `%s` formatting, and give every
+`except` that turns an error into a user-facing message a `logger.exception`.
+See `specs/logging-observability.md`.
+
 ### Error handling
 
 Governing rule across the codebase: **never fabricate a result** — a failed

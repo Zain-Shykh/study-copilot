@@ -1,5 +1,7 @@
 """Google OAuth credential load/refresh/persist, and API client builders."""
 
+import logging
+
 import psycopg
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -7,6 +9,8 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import Resource, build
 
 from agent.db import repo
+
+logger = logging.getLogger(__name__)
 
 NOT_AUTHENTICATED_MESSAGE = (
     "Google access has expired — please re-run "
@@ -33,6 +37,7 @@ def get_credentials(conn: psycopg.Connection) -> Credentials:
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
         repo.save_google_credentials(conn, creds)
+        logger.info("Google access token refreshed")
 
     return creds
 
@@ -67,7 +72,8 @@ def load_google_clients(conn: psycopg.Connection) -> tuple[Resource, Resource, R
     """
     try:
         return get_google_clients(conn)
-    except (RuntimeError, RefreshError):
+    except (RuntimeError, RefreshError) as e:
+        logger.warning("Google credentials unusable: %s", e)
         return NOT_AUTHENTICATED_MESSAGE
 
 

@@ -14,6 +14,7 @@ from agent.db import repo
 from agent.graph.nodes import gmail
 from agent.graph.nodes.whatsapp_send import send_whatsapp_message
 from agent.graph.state import EmailState
+from agent.logging_setup import log_node
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ async def draft_node(state: EmailState, config: RunnableConfig) -> dict:
         try:
             original_body = gmail.get_message_body(gmail_service, state["gmail_message_id"])
         except HttpError as e:
+            logger.exception("email draft: loading original email failed")
             return {"failure_text": f"Couldn't load the original email: {e}"}
 
     configurable = config["configurable"]
@@ -42,6 +44,7 @@ async def draft_node(state: EmailState, config: RunnableConfig) -> dict:
             original_body=original_body,
         )
     except Exception as e:  # noqa: BLE001 - Gemini error after retries
+        logger.exception("email draft: Gemini draft failed")
         return {"failure_text": f"Couldn't draft that email: {e}", "original_body": original_body}
 
     if state["mode"] == "reply":
@@ -134,6 +137,7 @@ async def revise_node(state: EmailState, config: RunnableConfig) -> dict:
             feedback=state["review_feedback"],
         )
     except Exception as e:  # noqa: BLE001 - Gemini error after retries
+        logger.exception("email revise: Gemini revision failed")
         return {"failure_text": f"Couldn't revise that email: {e}"}
 
     if state["mode"] == "reply":
@@ -162,6 +166,7 @@ async def send_node(state: EmailState, config: RunnableConfig) -> dict:
             thread_id=state.get("gmail_thread_id"),
         )
     except HttpError as e:
+        logger.exception("email send: Gmail send failed")
         return {"failure_text": f"Couldn't send that email: {e}. {retry_hint}"}
 
     message_id = configurable["_pending_item_message_id"]
@@ -188,13 +193,13 @@ async def relay_send_node(state: EmailState, config: RunnableConfig) -> dict:
 
 def build_email_graph(checkpointer) -> CompiledStateGraph:
     g = StateGraph(EmailState)
-    g.add_node("draft_node", draft_node)
-    g.add_node("relay_node", relay_node)
-    g.add_node("await_review_node", await_review_node)
-    g.add_node("parse_review_node", parse_review_node)
-    g.add_node("revise_node", revise_node)
-    g.add_node("send_node", send_node)
-    g.add_node("relay_send_node", relay_send_node)
+    g.add_node("draft_node", log_node(draft_node))
+    g.add_node("relay_node", log_node(relay_node))
+    g.add_node("await_review_node", log_node(await_review_node))
+    g.add_node("parse_review_node", log_node(parse_review_node))
+    g.add_node("revise_node", log_node(revise_node))
+    g.add_node("send_node", log_node(send_node))
+    g.add_node("relay_send_node", log_node(relay_send_node))
 
     g.set_entry_point("draft_node")
     g.add_edge("draft_node", "relay_node")

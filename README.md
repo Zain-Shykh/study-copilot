@@ -97,6 +97,7 @@ Fill in every value in `.env`:
 | `MY_WHATSAPP_NUMBER` | Your own WhatsApp number — the only number the bot will act on |
 | `NGROK_AUTHTOKEN` / `NGROK_STATIC_DOMAIN` | Tunnel exposing the webhook publicly |
 | `DATABASE_URL` | e.g. `postgresql://local_agent_app:<password>@localhost:5432/local_agent` |
+| `LOG_LEVEL` / `LOG_FORMAT` / `LOG_DIR` | Optional. `DEBUG\|INFO\|WARNING\|ERROR` (default `INFO`), `text\|json` (default `text`), log folder (default `logs/`) |
 
 ### 4. Authenticate with Google (one-time)
 
@@ -135,6 +136,29 @@ Starts the webhook server.
 
 Then message your WhatsApp test number from `MY_WHATSAPP_NUMBER` (e.g.
 "what's due this week?") to confirm it responds.
+
+## Logs
+
+The app logs to the console and to `logs/app.log` (rotates at 5 MB, keeps 5
+backups; the `logs/` folder is gitignored). Each line looks like:
+
+```
+2026-10-15T19:22:14+0500 | ERROR | a1b2c3d4 | agent.graph.nodes.ingestion.ingest_assignment:46 | ingestion: attachment failed drive_file_id=abc
+```
+
+— timestamp, level, **request id**, `module.function:line`, message, and a
+full traceback for errors. Every inbound WhatsApp message gets its own
+8-character request id that follows it through the background work it
+starts, so to see everything one message caused:
+
+```bash
+grep a1b2c3d4 logs/app.log
+```
+
+The `inbound message wamid=...` line links the request id to Meta's message
+id. Set `LOG_LEVEL=DEBUG` for more detail, or `LOG_FORMAT=json` for one JSON
+object per line (easy to filter with `jq`). Message text, email content,
+tokens, and full phone numbers are never logged.
 
 ## Observability (optional)
 

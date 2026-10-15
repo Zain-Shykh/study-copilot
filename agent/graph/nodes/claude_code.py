@@ -2,8 +2,12 @@
 
 import asyncio
 import json
+import logging
 import os
+import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Env vars intentionally NOT passed through to the subprocess — it has no
 # business talking to Postgres, Google, WhatsApp, or Gemini, per the Claude
@@ -184,6 +188,28 @@ async def run_claude_code(
     feedback: str | None = None,
     student_info: str = "",
 ) -> dict:
+    """Logs start/finish around _run_claude_code (see its docstring for the
+    full contract)."""
+    mode = "fresh" if resume_session_id is None else ("revise" if feedback is not None else "resume")
+    logger.info("claude code started dir=%s mode=%s", workspace_dir.name, mode)
+    start = time.monotonic()
+    result = await _run_claude_code(
+        workspace_dir,
+        resume_session_id=resume_session_id,
+        feedback=feedback,
+        student_info=student_info,
+    )
+    logger.info("claude code finished in %.1fs success=%s", time.monotonic() - start, result.get("success"))
+    return result
+
+
+async def _run_claude_code(
+    workspace_dir: Path,
+    *,
+    resume_session_id: str | None = None,
+    feedback: str | None = None,
+    student_info: str = "",
+) -> dict:
     """Runs a headless Claude Code session scoped to workspace_dir via
     --tools=_TOOLS (Read/Write/Edit/Glob/Grep/NotebookEdit/WebSearch/WebFetch
     only — no Bash, no code execution of any kind; see the module comment
@@ -267,11 +293,17 @@ async def run_claude_code(
                 # "timed out" failure because we never checked. If the
                 # deliverables are actually there and valid, use them
                 # instead of throwing away real, completed work.
+                logger.warning(
+                    "claude code timed out after %ds; checking disk for valid manifest", _TIMEOUT_SECONDS
+                )
                 manifest_or_error = _validate_manifest(workspace_dir)
                 if isinstance(manifest_or_error, dict):
+                    logger.info("claude code timeout: valid manifest found on disk, using it")
                     return _build_success_result(workspace_dir, manifest_or_error, session_id=None)
+                logger.warning("claude code timeout: no valid manifest (%s)", manifest_or_error)
                 return {"success": False, "error": "Claude Code timed out", "session_id": None}
         except OSError as e:
+            logger.exception("failed to start claude code")
             return {"success": False, "error": f"Failed to start Claude Code: {e}", "session_id": None}
 
         try:
@@ -280,6 +312,11 @@ async def run_claude_code(
             session_id = None
 
         if process.returncode != 0:
+            logger.error(
+                "claude code exited returncode=%s stderr=%s",
+                process.returncode,
+                stderr.decode(errors="replace")[:1000],
+            )
             return {
                 "success": False,
                 "error": stderr.decode(errors="replace") or "Claude Code exited with an error",
@@ -288,6 +325,7 @@ async def run_claude_code(
 
         manifest_or_error = _validate_manifest(workspace_dir)
         if isinstance(manifest_or_error, str):
+            logger.warning("claude code produced an invalid submission: %s", manifest_or_error)
             return {"success": False, "error": manifest_or_error, "session_id": session_id}
 
         return _build_success_result(workspace_dir, manifest_or_error, session_id)

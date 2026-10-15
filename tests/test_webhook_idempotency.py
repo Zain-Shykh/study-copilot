@@ -168,3 +168,28 @@ def test_status_reports_connected(monkeypatch):
 
 def test_status_reports_auth_problem(monkeypatch):
     assert _status_reply(monkeypatch, "Google access has expired") == "Google access has expired"
+
+
+def test_inbound_log_has_wamid_and_length_but_never_the_message_text(monkeypatch, caplog):
+    import logging
+
+    from agent.logging_setup import request_id_var
+
+    caplog.set_level(logging.INFO)
+    app = _build_app()
+    monkeypatch.setattr(routes_module.repo, "mark_message_processed_if_new", lambda conn, mid: True)
+    seen = {}
+
+    async def capture(*args, **kwargs):
+        seen["request_id"] = request_id_var.get()
+
+    app.state.graph.ainvoke = AsyncMock(side_effect=capture)
+    secret_text = "my private homework question"
+
+    asyncio.run(_post_and_drain(app, _text_message_payload(secret_text, msg_id="wamid.LOG1")))
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("wamid=wamid.LOG1" in m and f"chars={len(secret_text)}" in m for m in messages)
+    assert not any(secret_text in m for m in messages)
+    assert not any(MY_NUMBER in m for m in messages)  # full number never logged
+    assert seen["request_id"] != "-"  # the background turn inherited the request id

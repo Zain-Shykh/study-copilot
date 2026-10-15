@@ -17,6 +17,7 @@ from agent import google_auth, llm
 from agent.db import repo
 from agent.graph.nodes import claude_code, ingestion
 from agent.graph.nodes.whatsapp_send import send_whatsapp_document, send_whatsapp_message
+from agent.logging_setup import log_node
 from agent.workspace import paths
 
 logger = logging.getLogger(__name__)
@@ -386,11 +387,13 @@ async def submission_prep_node(state: AssignmentState, config: RunnableConfig) -
     try:
         final_files = _package_submission(manifest, submission_dir, dest_dir, title)
     except Exception as e:  # noqa: BLE001 - zipfile/Pandoc error, reported plainly
+        logger.exception("submission prep failed (package)")
         return {"failure_text": f'Couldn\'t prepare "{title}" for submission: {e}. {retry_hint}'}
 
     try:
         drive_links = [_upload_to_drive(drive_service, f) for f in final_files]
     except Exception as e:  # noqa: BLE001 - Drive HttpError or transport error
+        logger.exception("submission prep failed (drive upload)")
         return {"failure_text": f'Couldn\'t prepare "{title}" for submission: {e}. {retry_hint}'}
 
     message_id = configurable["_pending_item_message_id"]
@@ -432,18 +435,18 @@ async def relay_submit_node(state: AssignmentState, config: RunnableConfig) -> d
 
 def build_assignment_graph(checkpointer) -> CompiledStateGraph:
     g = StateGraph(AssignmentState)
-    g.add_node("ingest_node", ingest_node)
-    g.add_node("draft_node", draft_node)
-    g.add_node("revise_node", revise_node)
-    g.add_node("save_session_node", save_session_node)
-    g.add_node("relay_node", relay_node)
-    g.add_node("await_review_node", await_review_node)
-    g.add_node("parse_review_node", parse_review_node)
-    g.add_node("ask_submit_node", ask_submit_node)
-    g.add_node("await_submit_node", await_submit_node)
-    g.add_node("parse_submit_node", parse_submit_node)
-    g.add_node("submission_prep_node", submission_prep_node)
-    g.add_node("relay_submit_node", relay_submit_node)
+    g.add_node("ingest_node", log_node(ingest_node))
+    g.add_node("draft_node", log_node(draft_node))
+    g.add_node("revise_node", log_node(revise_node))
+    g.add_node("save_session_node", log_node(save_session_node))
+    g.add_node("relay_node", log_node(relay_node))
+    g.add_node("await_review_node", log_node(await_review_node))
+    g.add_node("parse_review_node", log_node(parse_review_node))
+    g.add_node("ask_submit_node", log_node(ask_submit_node))
+    g.add_node("await_submit_node", log_node(await_submit_node))
+    g.add_node("parse_submit_node", log_node(parse_submit_node))
+    g.add_node("submission_prep_node", log_node(submission_prep_node))
+    g.add_node("relay_submit_node", log_node(relay_submit_node))
 
     g.set_entry_point("ingest_node")
     g.add_conditional_edges(

@@ -5,3 +5,4 @@ __pycache__/
 *.egg-info/
 scripts/.google_token.json
 .claude/worktrees/
+logs/

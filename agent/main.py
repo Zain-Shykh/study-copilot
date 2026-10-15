@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from google import genai
@@ -16,6 +17,7 @@ from agent.graph.email_graph import build_email_graph
 from agent.graph.nodes.whatsapp_send import send_whatsapp_message
 from agent.graph.recovery import scan_for_interrupted_threads
 from agent.graph.router_graph import build_router_graph
+from agent.logging_setup import setup_logging
 from agent.webhook.routes import router as webhook_router
 
 logger = logging.getLogger(__name__)
@@ -30,9 +32,11 @@ def create_app() -> FastAPI:
     be garbage-collected mid-run).
     """
     settings = load_settings()
+    setup_logging(settings.log_level, settings.log_format, Path(settings.log_dir))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        logger.info("app starting (log_level=%s, log_format=%s)", settings.log_level, settings.log_format)
         pool = ConnectionPool(settings.database_url, open=True)
         async with AsyncPostgresSaver.from_conn_string(settings.database_url) as checkpointer:
             await checkpointer.setup()
@@ -61,21 +65,27 @@ def create_app() -> FastAPI:
                 except Exception:
                     logger.exception("Failed to send crash-recovery heads-up for %s", name)
 
+            logger.info("crash recovery: %d interrupted thread(s)", len(interrupted))
+
             try:
                 with pool.connection() as conn:
                     problem = google_auth.check_auth(conn)
                 if problem:
+                    logger.warning("startup google auth check: %s", problem)
                     await send_whatsapp_message(
                         settings.meta_whatsapp_access_token,
                         settings.meta_whatsapp_phone_number_id,
                         settings.my_whatsapp_number,
                         problem,
                     )
+                else:
+                    logger.info("startup google auth check: ok")
             except Exception:
                 logger.exception("Startup Google auth check failed")
 
             yield
 
+        logger.info("app shutting down")
         pool.close()
 
     app = FastAPI(lifespan=lifespan)

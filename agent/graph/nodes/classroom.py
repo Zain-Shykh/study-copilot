@@ -1,9 +1,12 @@
 """Google Classroom API calls: courses, coursework, announcements, submissions."""
 
 import difflib
+import logging
 from datetime import datetime, timedelta, timezone
 
 from googleapiclient.errors import HttpError
+
+logger = logging.getLogger(__name__)
 
 _MISSING_STATES = {"TURNED_IN", "RETURNED"}
 
@@ -103,6 +106,7 @@ def list_assignments(
                 if not page_token:
                     break
         except HttpError:
+            logger.warning("list_assignments: course_id=%s failed", course["id"], exc_info=True)
             failed_courses.append(course["name"])
             continue
 

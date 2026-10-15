@@ -4,6 +4,7 @@ import asyncio
 import difflib
 import email.utils
 import logging
+import time
 import uuid
 
 import httpx
@@ -20,6 +21,7 @@ from agent.graph.nodes.answer_question import answer_question_node
 from agent.graph.nodes.whatsapp_send import send_whatsapp_message
 from agent.graph.state import RouterState
 from agent.llm import classify_intent
+from agent.logging_setup import log_node
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +102,7 @@ def classify_intent_node(state: RouterState, config: RunnableConfig) -> dict:
         logger.exception("classify_intent failed after retries")
         return {"reply_text": "Couldn't process that message right now — please try again."}
 
+    logger.info("intent=%s arg_keys=%s", intent, sorted(args))
     return {"intent": intent, "intent_args": args}
 
 
@@ -162,6 +165,7 @@ def resolve_assignment_node(state: RouterState, config: RunnableConfig) -> dict:
             classroom_service, courses, scope="all", window_hours=0
         )
     except HttpError as e:
+        logger.exception("assignment resolve: Classroom unreachable")
         return {"reply_text": f"Couldn't reach Classroom right now: {e}"}
 
     assignments_by_course: dict[str, list[dict]] = {}
@@ -170,20 +174,26 @@ def resolve_assignment_node(state: RouterState, config: RunnableConfig) -> dict:
 
     candidates = classroom.find_assignment_candidates(courses, assignments_by_course, reference_text)
     if not candidates:
+        logger.info("assignment resolve: none candidates=0")
         return {"reply_text": NO_MATCH_REPLY, "pending_question": None}
 
     best = candidates[0]
     second_score = candidates[1]["score"] if len(candidates) > 1 else 0.0
     if best["score"] >= _CONFIDENT_MATCH_SCORE and (best["score"] - second_score) >= _CONFIDENT_MATCH_MARGIN:
+        logger.info("assignment resolve: confident candidates=%d best_score=%.2f", len(candidates), best["score"])
         return _confirm_reply(best)
 
     shortlisted = [c for c in candidates if c["score"] >= _DISAMBIGUATION_MIN_SCORE][
         :_DISAMBIGUATION_MAX_CANDIDATES
     ]
     if not shortlisted:
+        logger.info("assignment resolve: none candidates=%d best_score=%.2f", len(candidates), best["score"])
         return {"reply_text": NO_MATCH_REPLY, "pending_question": None}
     if len(shortlisted) == 1:
+        logger.info("assignment resolve: single candidates=1 best_score=%.2f", best["score"])
         return _confirm_reply(shortlisted[0])
+
+    logger.info("assignment resolve: ambiguous candidates=%d best_score=%.2f", len(shortlisted), best["score"])
 
     lines = [
         f'{i + 1}. [{c["course_name"]}] {c["title"]} — due {c["due"] or "no due date"}'
@@ -388,6 +398,9 @@ async def run_assignment_flow(
     there is no separate "detect completion" step. See spec §11."""
     course_id = resolved["course_id"]
     coursework_id = resolved["coursework_id"]
+    thread_id = f"assignment:{course_id}:{coursework_id}"
+    logger.info("flow started thread_id=%s kind=run", thread_id)
+    start = time.monotonic()
 
     try:
         await assignment_graph.ainvoke(
@@ -425,6 +438,8 @@ async def run_assignment_flow(
             )
         except Exception:
             logger.exception("Failed to send failure notice for %s", resolved["title"])
+    finally:
+        logger.info("flow finished thread_id=%s in %.1fs", thread_id, time.monotonic() - start)
 
 
 async def resume_assignment_thread(
@@ -447,6 +462,8 @@ async def resume_assignment_thread(
     Only an unmodeled crash (the graph raising before reaching one of
     those nodes) gets a generic failure message here, mirroring
     run_assignment_flow's own top-level try/except."""
+    logger.info("flow started thread_id=%s kind=resume", thread_id)
+    start = time.monotonic()
     try:
         await assignment_graph.ainvoke(
             Command(resume=reply_text),
@@ -473,6 +490,8 @@ async def resume_assignment_thread(
             )
         except Exception:
             logger.exception("Failed to send failure notice for thread %s", thread_id)
+    finally:
+        logger.info("flow finished thread_id=%s in %.1fs", thread_id, time.monotonic() - start)
 
 
 async def run_email_flow(
@@ -491,6 +510,8 @@ async def run_email_flow(
     step), so genai_client/gemini_model are passed here too, not only on
     resume. See spec §6.3."""
     thread_id = f"email:{uuid.uuid4()}"
+    logger.info("flow started thread_id=%s kind=run", thread_id)
+    start = time.monotonic()
     try:
         await email_graph.ainvoke(
             {
@@ -526,6 +547,8 @@ async def run_email_flow(
             )
         except Exception:
             logger.exception("Failed to send failure notice for email to %s", resolved["recipient_display"])
+    finally:
+        logger.info("flow finished thread_id=%s in %.1fs", thread_id, time.monotonic() - start)
 
 
 async def resume_email_thread(
@@ -543,6 +566,8 @@ async def resume_email_thread(
     """Same shape and same Decision #3 rationale as resume_assignment_thread
     — no ack sent here; the graph's own parse_review_node is the sole
     source of any outbound message for a modeled outcome."""
+    logger.info("flow started thread_id=%s kind=resume", thread_id)
+    start = time.monotonic()
     try:
         await email_graph.ainvoke(
             Command(resume=reply_text),
@@ -569,10 +594,13 @@ async def resume_email_thread(
             )
         except Exception:
             logger.exception("Failed to send failure notice for thread %s", thread_id)
+    finally:
+        logger.info("flow finished thread_id=%s in %.1fs", thread_id, time.monotonic() - start)
 
 
 def _dispatch_pending_resume(item: dict, reply_text: str, state: RouterState, config: RunnableConfig) -> None:
     configurable = config["configurable"]
+    logger.info("dispatching %s thread_id=%s", item["item_type"], item["thread_id"])
     if item["item_type"] == "assignment":
         coro = resume_assignment_thread(
             configurable["assignment_graph"],
@@ -630,10 +658,12 @@ async def resolve_pending_item_node(state: RouterState, config: RunnableConfig) 
         items = repo.list_pending_items(conn)
 
     if not items:
+        logger.info("pending resolve: none candidates=0")
         return {"reply_text": "There's nothing pending right now."}
 
     if len(items) == 1:
         # Only one thing it could be, regardless of match confidence.
+        logger.info("pending resolve: single candidates=1")
         _dispatch_pending_resume(items[0], state["inbound_text"], state, config)
         return {}
 
@@ -641,6 +671,7 @@ async def resolve_pending_item_node(state: RouterState, config: RunnableConfig) 
         # No name given at all (e.g. a bare "yes") with more than one item
         # pending — this isn't "zero matches found", it's "nothing to score
         # against", so ask among all of them rather than reporting no match.
+        logger.info("pending resolve: ambiguous (no name given) candidates=%d", len(items))
         lines = [f'{i + 1}. {c["display_name"]}' for i, c in enumerate(items)]
         return {
             "reply_text": "Which one did you mean?\n" + "\n".join(lines),
@@ -663,6 +694,7 @@ async def resolve_pending_item_node(state: RouterState, config: RunnableConfig) 
     best = candidates[0]
     second_score = candidates[1]["score"]
     if best["score"] >= _CONFIDENT_MATCH_SCORE and (best["score"] - second_score) >= _CONFIDENT_MATCH_MARGIN:
+        logger.info("pending resolve: confident candidates=%d best_score=%.2f", len(candidates), best["score"])
         _dispatch_pending_resume(best, state["inbound_text"], state, config)
         return {}
 
@@ -670,10 +702,13 @@ async def resolve_pending_item_node(state: RouterState, config: RunnableConfig) 
         :_DISAMBIGUATION_MAX_CANDIDATES
     ]
     if not shortlisted:
+        logger.info("pending resolve: none candidates=%d best_score=%.2f", len(candidates), best["score"])
         return {"reply_text": "I couldn't find a pending item matching that — try naming it differently."}
     if len(shortlisted) == 1:
+        logger.info("pending resolve: single candidates=1 best_score=%.2f", best["score"])
         _dispatch_pending_resume(shortlisted[0], state["inbound_text"], state, config)
         return {}
+    logger.info("pending resolve: ambiguous candidates=%d best_score=%.2f", len(shortlisted), best["score"])
 
     lines = [f'{i + 1}. {c["display_name"]}' for i, c in enumerate(shortlisted)]
     return {
@@ -714,6 +749,9 @@ async def handle_confirmation_node(state: RouterState, config: RunnableConfig) -
         }
 
     if answer == "confirm":
+        logger.info(
+            "dispatching assignment thread_id=assignment:%s:%s", resolved["course_id"], resolved["coursework_id"]
+        )
         task = asyncio.create_task(
             run_assignment_flow(
                 configurable["assignment_graph"],
@@ -754,6 +792,7 @@ async def handle_email_confirmation_node(state: RouterState, config: RunnableCon
         }
 
     if answer == "confirm":
+        logger.info("dispatching email draft")
         task = asyncio.create_task(
             run_email_flow(
                 configurable["email_graph"],
@@ -858,6 +897,7 @@ async def send_reply_node(state: RouterState, config: RunnableConfig) -> dict:
         logger.exception("Failed to send WhatsApp reply to %s", state["sender"])
         return {}
 
+    logger.info("reply sent chars=%d", len(reply_text))
     pending_question = state.get("pending_question")
     if pending_question is not None and pending_question.get("message_id") is None:
         pending_question = {**pending_question, "message_id": message_id}
@@ -868,20 +908,20 @@ async def send_reply_node(state: RouterState, config: RunnableConfig) -> dict:
 
 def build_router_graph(checkpointer) -> CompiledStateGraph:
     g = StateGraph(RouterState)
-    g.add_node("route_entry", route_entry_node)
-    g.add_node("classify_intent", classify_intent_node)
-    g.add_node("resolve_assignment", resolve_assignment_node)
-    g.add_node("resolve_email", resolve_email_node)
-    g.add_node("resolve_pending_item", resolve_pending_item_node)
-    g.add_node("handle_confirmation", handle_confirmation_node)
-    g.add_node("handle_disambiguation", handle_disambiguation_node)
-    g.add_node("handle_email_confirmation", handle_email_confirmation_node)
-    g.add_node("handle_email_details", handle_email_details_node)
-    g.add_node("handle_pending_item_reply", handle_pending_item_reply)
-    g.add_node("handle_pending_item_disambiguation", handle_pending_item_disambiguation_node)
-    g.add_node("answer_question_node", answer_question_node)
-    g.add_node("fallback_node", fallback_node)
-    g.add_node("send_reply", send_reply_node)
+    g.add_node("route_entry", log_node(route_entry_node))
+    g.add_node("classify_intent", log_node(classify_intent_node))
+    g.add_node("resolve_assignment", log_node(resolve_assignment_node))
+    g.add_node("resolve_email", log_node(resolve_email_node))
+    g.add_node("resolve_pending_item", log_node(resolve_pending_item_node))
+    g.add_node("handle_confirmation", log_node(handle_confirmation_node))
+    g.add_node("handle_disambiguation", log_node(handle_disambiguation_node))
+    g.add_node("handle_email_confirmation", log_node(handle_email_confirmation_node))
+    g.add_node("handle_email_details", log_node(handle_email_details_node))
+    g.add_node("handle_pending_item_reply", log_node(handle_pending_item_reply))
+    g.add_node("handle_pending_item_disambiguation", log_node(handle_pending_item_disambiguation_node))
+    g.add_node("answer_question_node", log_node(answer_question_node))
+    g.add_node("fallback_node", log_node(fallback_node))
+    g.add_node("send_reply", log_node(send_reply_node))
 
     g.set_entry_point("route_entry")
     g.add_conditional_edges(

@@ -1,6 +1,6 @@
 # Logging & observability
 
-Status: **draft — awaiting approval.** No implementation code until approved.
+Status: **approved and implemented.**
 
 ## 1. Problem
 

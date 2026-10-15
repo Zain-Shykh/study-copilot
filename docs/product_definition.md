@@ -264,6 +264,15 @@ API token billing) as the actual drafting engine, scoped tightly per assignment:
   interactive usage, that's just a normal drafting failure per the error
   handling below — reported plainly, no silent retry.
 
+### Logging
+The app keeps a local, rotating log file (`logs/app.log`) so a failure can be
+traced to the exact function and to the single inbound message that caused it.
+Each inbound message gets a request id carried through all of its background
+work. Logs record IDs, counts, lengths and durations — never your message
+text, email content, assignment titles/content, tokens, or full phone
+numbers — and stay on your machine. Logging is purely diagnostic: it changes
+no user-facing behavior. See `specs/logging-observability.md`.
+
 ### Error handling — API failures
 Governing principle: **never fabricate a result**. If a Gmail, Classroom,
 Drive, or Claude call fails, the agent reports the failure plainly — it never

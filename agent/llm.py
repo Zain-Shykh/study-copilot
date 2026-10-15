@@ -181,6 +181,7 @@ def answer_question(
         raise RuntimeError("answer_question: model produced no final text")
     return response.text
 
+
 def _retry_model(fn: Callable[[str], object], model: str):
     """Calls fn(model) up to _MAX_ATTEMPTS times with exponential backoff.
     Raises the last error once attempts are exhausted."""
@@ -190,6 +191,7 @@ def _retry_model(fn: Callable[[str], object], model: str):
             return fn(model)
         except Exception as e:  # noqa: BLE001 - transient network/5xx/429 from the API
             last_error = e
+            logger.warning("gemini call failed model=%s attempt=%d/%d: %s", model, attempt + 1, _MAX_ATTEMPTS, e)
             if attempt < _MAX_ATTEMPTS - 1:
                 time.sleep(_BACKOFF_SECONDS * (2**attempt))
     raise last_error

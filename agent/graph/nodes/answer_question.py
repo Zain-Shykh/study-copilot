@@ -35,6 +35,7 @@ def answer_question_node(state: RouterState, config: RunnableConfig) -> dict:
         try:
             courses = classroom.list_courses(classroom_service)
         except HttpError as e:
+            logger.exception("answer_question tool get_courses failed")
             return [{"error": str(e)}]
         return [{"name": c["name"]} for c in courses]
 
@@ -56,6 +57,7 @@ def answer_question_node(state: RouterState, config: RunnableConfig) -> dict:
                 classroom_service, courses, scope="all", window_hours=0
             )
         except HttpError as e:
+            logger.exception("answer_question tool get_all_assignments failed")
             return {"error": str(e)}
         result = {
             "assignments": [
@@ -85,6 +87,7 @@ def answer_question_node(state: RouterState, config: RunnableConfig) -> dict:
                 classroom_service, courses, scope="missing", window_hours=0
             )
         except HttpError as e:
+            logger.exception("answer_question tool get_missing_assignments failed")
             return {"error": str(e)}
         result = {
             "assignments": [
@@ -112,6 +115,7 @@ def answer_question_node(state: RouterState, config: RunnableConfig) -> dict:
         try:
             courses = classroom.list_courses(classroom_service)
         except HttpError as e:
+            logger.exception("answer_question tool get_announcements failed (list_courses)")
             return [{"error": str(e)}]
 
         if course_name:
@@ -123,6 +127,7 @@ def answer_question_node(state: RouterState, config: RunnableConfig) -> dict:
         try:
             entries = classroom.list_announcements(classroom_service, courses)
         except HttpError as e:
+            logger.exception("answer_question tool get_announcements failed (list_announcements)")
             return [{"error": str(e)}]
         return [
             {
@@ -169,6 +174,7 @@ def answer_question_node(state: RouterState, config: RunnableConfig) -> dict:
         try:
             return gmail.list_messages(gmail_service, query, max_results)
         except HttpError as e:
+            logger.exception("answer_question tool get_recent_emails failed")
             return [{"error": str(e)}]
 
     try:

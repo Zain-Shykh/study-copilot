@@ -13,6 +13,9 @@ DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
 # rather than UTC.
 USER_TIMEZONE = ZoneInfo("Asia/Karachi")
 
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+_LOG_FORMATS = ("text", "json")
+
 _REQUIRED_ENV_VARS = [
     "DATABASE_URL",
     "GOOGLE_OAUTH_CLIENT_ID",
@@ -39,6 +42,9 @@ class Settings:
     gemini_api_key: str
     gemini_model: str
     student_info: str
+    log_level: str = "INFO"
+    log_format: str = "text"
+    log_dir: str = "logs"
 
 
 def load_settings() -> Settings:
@@ -53,6 +59,13 @@ def load_settings() -> Settings:
     if missing:
         raise RuntimeError(f"Missing required env var(s): {', '.join(missing)}")
 
+    log_level = (os.environ.get("LOG_LEVEL") or "INFO").upper()
+    if log_level not in _LOG_LEVELS:
+        raise RuntimeError(f"Invalid LOG_LEVEL '{log_level}' — expected one of {', '.join(_LOG_LEVELS)}")
+    log_format = (os.environ.get("LOG_FORMAT") or "text").lower()
+    if log_format not in _LOG_FORMATS:
+        raise RuntimeError(f"Invalid LOG_FORMAT '{log_format}' — expected one of {', '.join(_LOG_FORMATS)}")
+
     return Settings(
         database_url=os.environ["DATABASE_URL"],
         google_oauth_client_id=os.environ["GOOGLE_OAUTH_CLIENT_ID"],
@@ -65,4 +78,7 @@ def load_settings() -> Settings:
         gemini_api_key=os.environ["GEMINI_API_KEY"],
         gemini_model=os.environ.get("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL,
         student_info=os.environ.get("STUDENT_INFO", ""),
+        log_level=log_level,
+        log_format=log_format,
+        log_dir=os.environ.get("LOG_DIR") or "logs",
     )

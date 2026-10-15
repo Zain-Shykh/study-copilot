@@ -51,6 +51,15 @@ flowchart TB
 assignment) only ever happens inside the LangGraph graphs, gated behind
 explicit `interrupt()` approval pauses.
 
+**Logging:** `agent/logging_setup.py` sends every module's logs to the
+console and a rotating `logs/app.log`. Each inbound WhatsApp message gets a
+short request id (a `ContextVar`, copied into background tasks by
+`asyncio.create_task`) stamped on every line, so one message's work can be
+followed across the webhook, the router graph, the assignment/email graph
+runs and Claude Code with `grep <id> logs/app.log`. Graph nodes are wrapped
+with `log_node` (duration, traceback on failure, interrupts logged as
+"paused"). Message text and other personal content are never logged.
+
 ## 2. Router graph — as implemented today
 
 Thread ID: `user:<whatsapp-number>`. One instance, long-lived, handles

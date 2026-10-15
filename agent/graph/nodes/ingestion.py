@@ -1,8 +1,11 @@
 """Assignment material ingestion: task-brief + attachment resolution, Pandoc conversion, fail-fast on any parse failure."""
 
+import logging
 from pathlib import Path
 
 from agent.graph.nodes import drive as drive_node
+
+logger = logging.getLogger(__name__)
 
 
 def build_task_brief(courseWork: dict) -> str:
@@ -34,6 +37,9 @@ async def ingest_assignment(
             .execute(num_retries=3)
         )
     except Exception as e:  # noqa: BLE001 - Classroom HttpError or transport error
+        logger.exception(
+            "ingestion: Classroom fetch failed course_id=%s coursework_id=%s", course_id, coursework_id
+        )
         return {"success": False, "failed_file": None, "error": str(e)}
 
     source_material_dir = dest_dir / "source-material"
@@ -53,6 +59,7 @@ async def ingest_assignment(
                     drive_service, file_id, source_material_dir
                 )
             except Exception as e:  # noqa: BLE001 - Drive HttpError or Pandoc conversion error
+                logger.exception("ingestion: attachment failed drive_file_id=%s", file_id)
                 return {"success": False, "failed_file": file_name, "error": str(e)}
 
             if resolved_path is None:
